@@ -1,0 +1,32 @@
+# Versions below are the ones actually installed and verified by
+# `python verify.py 0` on Windows 11 / Python 3.12.10 (2026-08-25). Direct
+# dependencies are pinned; transitive ones are left to the resolver deliberately, so
+# this stays a requirements file rather than a platform-specific lockfile.
+
+yt-dlp==2026.8.19
+faster-whisper==1.2.1
+rapidfuzz==3.14.5
+opencv-python==5.0.0.93
+av==18.1.0
+pytest==9.1.1
+
+# --- OCR stack ---
+# Pinned per CLAUDE.md's "Known Gotchas": videocr-PaddleOCR's wrapper breaks on
+# PaddleOCR 3.x. Verified: 2.10.0 resolves and imports cleanly.
+paddleocr==2.10.0
+
+# paddleocr does NOT declare paddlepaddle as a dependency, but imports it at module
+# load (`from paddle.utils import try_import`), so `import paddleocr` fails with
+# ModuleNotFoundError: No module named 'paddle' unless it's installed explicitly.
+# 3.0.0 is the oldest 3.x that paddleocr 2.10.0 officially supports and works with the
+# numpy 2.x that the rest of this stack pulls in (paddlepaddle 2.6.2 is built against
+# numpy 1.x and would force a downgrade).
+paddlepaddle==3.0.0
+
+# The repo is named videocr-PaddleOCR but its package metadata declares the project
+# name "videocr" (it's a fork of the original videocr, and PyPI's `videocr` is the
+# Tesseract-based upstream, not this fork). pip rejects the install if the requirement
+# name doesn't match the metadata name, so this must be `videocr @ ...`, not
+# `videocr-PaddleOCR @ ...`. Pinned to a commit -- a bare git URL tracks a moving HEAD,
+# which defeats the point of a pinned requirements file.
+videocr @ git+https://github.com/oliverfei/videocr-PaddleOCR.git@b56af756cd2fdcdb54c79037d507aa8aec3c23c5

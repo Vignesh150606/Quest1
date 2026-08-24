@@ -1,0 +1,254 @@
+PROMPTS LOG
+===========
+Format per entry: [Tool] -- what was asked -- what was taken / rejected and why.
+This is a human-verified audit record, not an auto-generated log -- review and correct
+this file yourself before submission rather than trusting any single tool to have
+captured everything (see CLAUDE.md's submission requirements).
+
+Entries below are seeded from work done before Claude Code was involved. Append new
+entries below the existing ones as you continue, in the same tool -> prompt -> outcome
+format. Don't reconstruct this from memory at the end -- add to it as you go.
+
+---
+
+[Claude, chat] -- Iterative architecture discussion covering: video URL mechanics,
+ASR vs OCR approaches, subtitle-track availability, and identifying (via screenshots)
+that the example video's target line is spoken dialogue with no on-screen caption.
+Used to establish the dual-track (ASR + OCR) design and the decision to treat
+--dialogue-text as an explicit input rather than something inferred from the video alone.
+
+[Claude, chat] -- Designed a 3-way parallel review: a Prior-Art Scout (tool/library
+survey), an Architecture Strategist (candidate pipeline designs), and an Adversarial
+Reviewer (interview prep questions), each run in a separate Claude session against the
+attached problem statement PDF.
+
+[Claude, sub-agent -- Prior-Art Scout] -- Surveyed tools/libraries across 6
+sub-problems (URL resolution, subtitle extraction, STT, forced alignment, OCR-in-video,
+frame-accurate extraction). Taken: yt-dlp, faster-whisper, PaddleOCR + videocr-PaddleOCR,
+PyAV as final picks; the ffmpeg-seek-vs-PyAV-seek frame mismatch and the
+PaddleOCR-3.x/videocr-PaddleOCR incompatibility as documented gotchas. Rejected:
+WhisperX as a separate dependency, once faster-whisper's native word-level timestamps
+were confirmed sufficient (see reconciliation below).
+
+[Claude, sub-agent -- Architecture Strategist] -- Proposed the shared
+Ingest -> ASR/OCR tracks -> Arbiter -> Refine -> Report pipeline, a day-by-day build
+plan, a cutting list, and an explicit not-building list. Taken largely as-is. Rejected:
+the "OCR track runs conditionally" framing was reconsidered later (see CLAUDE.md);
+"subtitle short-circuit is a free win but cut for scope" was an internal contradiction
+in this agent's own answer and was corrected by keeping the subtitle fast-path in.
+
+[Claude, chat] -- Reconciled the Prior-Art Scout and Architecture Strategist outputs
+where they disagreed: adopted faster-whisper's native word-level timestamps instead of
+WhisperX (gets the precision without the extra dependency), kept the subtitle
+fast-path, standardized on PyAV only for in-pipeline frame extraction, and flagged the
+PaddleOCR version pin as a Day-1 risk rather than a Day-3 surprise.
+
+[Claude, chat] -- Produced the first CLAUDE.md draft synthesizing the problem
+statement, the reconciled architecture, tech stack, day-by-day plan, cutting list, and
+not-building list, intended as project context for a future Claude Code session.
+
+[ChatGPT] -- Reviewed the first CLAUDE.md draft as a "Claude Code control document."
+Taken: reframe from "settled decisions" to "baseline, challengeable with evidence";
+explicit ground-truth/acceptance criteria for tests; a defined Candidate schema; a
+deterministic (non-ML) arbiter policy; a "stop and escalate for major decisions" rule;
+dependency minimization language; Docker + documented local fallback; prompts.txt as a
+human-verified record spanning every tool used, not just Claude Code. Rejected: leaning
+toward making the OCR track conditional/short-circuited by default (kept unconditional
+dual-track as the simpler, lower-risk baseline given time remaining); a specific
+claimed clock-time that couldn't be independently verified.
+
+[Claude, chat] -- Produced the revised CLAUDE.md incorporating the above reconciliation.
+
+[Claude, sub-agent -- Phase Architect] -- Given CLAUDE.md and the problem statement PDF,
+plus a draft 8-phase outline, validated and tightened it into Phase 0-7 with concrete
+Consumes/Produces/Files/Verification per phase. Taken: the entire phase breakdown,
+including one structural correction this agent made unprompted -- moving the Candidate
+schema definition from the original Phase 4 draft into Phase 1, since Phase 1's
+subtitle fast-path and both Phase 2/3 tracks need the schema before Phase 4 exists.
+
+[Claude, chat] -- Generated this repository scaffold (stub modules matching each
+phase's interface, skip-marked tests with real assertions, verify.py per-phase runner,
+Docker/README/APPROACH skeletons) directly from the Phase Architect's output and
+CLAUDE.md, rather than delegating scaffold generation to another chat session.
+
+---
+
+USER-AUTHORED PROMPTS (merged from session_prompts_log.md)
+============================================================
+The entries above summarize tool calls and their outcomes. The entries below are the
+prompts the user actually wrote during the pre-Claude-Code planning conversation, kept
+as a human-curated record per CLAUDE.md's audit-record requirement. Several map onto
+specific entries above (noted inline); those are not duplicated in full, only
+cross-referenced. Sub-agent outputs, pasted screenshots, and the pasted Slack/ChatGPT
+content referenced below are not reproduced here -- see the entries above and the
+original session artifacts.
+
+1. [Claude, chat] -- Set up how multimodal input would work for the session -- get
+voice-mode transcriptions right, analyze any uploaded photos, working timeline ~2.5
+days from receipt of the problem statement.
+Why: Established session ground rules before any content existed, so later photo/voice
+input would actually get looked at rather than assumed.
+
+2. [Claude, chat] -- Uploaded the submission-process flowchart + timeline screenshots
+and a pasted Slack Q&A thread; asked for approach given that grading is on engineering
+skill (not prompt-writing), that recruiter runtime must show zero dependency/compilation
+errors, whether to Dockerize, and how to be distinct from other students given an
+upcoming interview.
+Why: Extracted the actual submission checklist and grading criteria from the images
+rather than assuming a generic hackathon format, and set the bar early: engineering
+defensibility over flashy scope. (Feeds into the "Iterative architecture discussion"
+entry above.)
+
+3. [Claude, chat] -- Uploaded the problem statement PDF with "First think -- we will
+implement it this evening."
+Why: Deliberately sequenced planning before coding, rather than jumping straight to
+implementation on a same-day deadline pressure.
+
+4. [Claude, chat] -- Asked how a video URL actually works, how to convert audio to text
+efficiently, whether existing subtitles could be used, and whether the PDF expressed a
+preference between OCR/ASR/subtitles.
+Why: Surveyed available techniques deliberately before committing to an OCR-only
+design -- this is what led to the layered subtitle-first / OCR / ASR-crosscheck
+recommendation instead of a single-method pipeline. (Part of the "Iterative
+architecture discussion" entry above.)
+
+5. [Claude, chat] -- Uploaded two screenshots of the example video around the target
+quote's timestamp and asked which frame should be returned -- the one where the speaker
+starts the line or where he finishes -- and flagged confusion over whether this was
+spoken or on-screen text.
+Why: This was the pivotal check -- manually verifying the actual video overturned the
+working assumption (OCR-only) and revealed the example is spoken dialogue with no
+caption, which reshaped the whole architecture toward a dual-track (ASR + OCR) design.
+(Part of the "Iterative architecture discussion" entry above.)
+
+6. [Claude, chat] -- Requested a 3-way parallel research/design split across separate
+Claude accounts: one to survey existing tools/GitHub repos, one to think through
+architecture options as an engineer, and repurposed a third from "codebase tutoring"
+to an adversarial interview reviewer.
+Why: Deliberate multi-agent strategy to parallelize investigation within a fixed time
+budget -- directly the "drive multiple AI agents, don't proxy for one" posture the org
+said they're grading. (See "Designed a 3-way parallel review" entry above.)
+
+7. [Claude, chat] -- Asked whether attaching just the problem statement PDF was
+sufficient context for each of the three parallel-review prompts.
+Why: Caught, before sending, that one of the three prompts depended on knowledge (the
+spoken-vs-caption finding from screenshots) that wasn't in the PDF and would have been
+missing for that agent otherwise.
+
+8. [Claude, chat] -- Asked for follow-up prompts for all three agents after their
+first round of answers.
+Why: Treated the multi-agent research as an iterative process, not a single one-shot
+query -- going deeper on what was useful rather than stopping at first answers.
+
+9. [Claude, chat] -- Asked for the same follow-ups again, but reworked to extract
+concise, structured, copy-back-friendly output instead of full prose responses.
+Why: A deliberate prompt-engineering correction mid-session -- recognized that verbose
+agent output would be costly to reconcile, and adjusted the prompts themselves to
+produce denser, more directly usable output.
+
+10. [Claude, chat] -- Pasted both agents' follow-up outputs and asked for them to be
+reconciled into one design.
+Why: Used a third pass to actively resolve disagreements between the two agents
+(WhisperX vs. native word-level timestamps; a self-contradiction in one agent's own
+answer about the subtitle short-circuit) rather than picking one agent's answer
+uncritically. (See "Reconciled the Prior-Art Scout and Architecture Strategist
+outputs" entry above.)
+
+11. [Claude, chat] -- Asked for a single consolidated context document containing the
+problem statement, the approach, and everything else needed, in preparation for
+starting a Claude Code session.
+Why: Recognized that a separate tool session would have zero memory of this
+conversation, and that the context needed to be captured in a durable file rather than
+re-explained. (See "Produced the first CLAUDE.md draft" entry above.)
+
+12. [Claude, chat] -- Pasted a full external review of the CLAUDE.md draft from
+ChatGPT and asked whether each suggested change was actually needed before adopting
+any of it.
+Why: Deliberately sought a second, independent critique of the AI-generated project
+spec before committing to it, and evaluated each of the 15 suggested changes on its own
+merits rather than accepting the review wholesale -- several points were adopted, one
+was explicitly pushed back on with reasoning. (See "[ChatGPT] -- Reviewed the first
+CLAUDE.md draft" entry above.)
+
+13. [Claude, chat] -- Asked for three prompts to scaffold the project into phases,
+structured so each phase could be tested independently before moving to the next, and
+asked how many phases the project should be split into.
+Why: Wanted incremental, independently verifiable progress checkpoints rather than a
+single all-or-nothing build, so problems would surface early per-stage instead of only
+at final integration. (Feeds into the "Phase Architect" entry above.)
+
+14. [Claude, chat] -- Pasted the first agent's phase-breakdown output and asked for
+the repo scaffold and verification harness to be built directly, plus a direct opinion
+on whether phase-based planning with skeleton-first scaffolding reflects how a
+professional developer actually works.
+Why: Wanted the actual workspace produced immediately rather than another round of
+delegation, and wanted honest calibration on the process itself rather than uncritical
+validation that "more planning = more professional." (See "Phase Architect" and
+"Generated this repository scaffold" entries above.)
+
+15. [Claude, chat] -- Asked whether starting Claude Code in the scaffolded repo would
+automatically pull in the prompts and approach used throughout this chat session.
+Why: Checked a factual assumption about tool behavior before relying on it -- this
+caught a real gap (Claude Code has no access to this conversation) that would otherwise
+have left prompts.txt and APPROACH.md incomplete at submission time.
+
+16. [Claude, chat] -- Requested a curated log of the above prompts with rationale, in
+a form ready to hand to Claude Code (produced session_prompts_log.md).
+Why: Closing the exact gap surfaced by prompt 15: making sure this conversation's
+history actually makes it into the submitted repo, in the audit-record format the
+problem statement requires.
+
+[Claude Code] -- Asked to merge session_prompts_log.md into prompts.txt.
+Why: Final step closing the loop from prompt 16 -- getting the human-curated
+pre-Claude-Code prompt record into the actual submitted audit file rather than leaving
+it as a separate, unsubmitted document.
+
+---
+
+BUILD PHASE (Claude Code, implementation sessions)
+============================================================
+
+[Claude Code] -- "Start with Phase 0 (Environment sanity) only -- from
+PHASE_CHECKLIST.md and PHASES.md. Read CLAUDE.md, PHASES.md, and PHASE_CHECKLIST.md in
+full before touching anything. Do only what Phase 0 requires: requirements.txt with
+pinned versions, and tests/test_environment.py (already written -- don't rewrite it
+unless you find a genuine bug in it; if so, flag it per CLAUDE.md's stop-and-escalate
+rule rather than silently changing it). Then actually run the verification yourself:
+`pip install -r requirements.txt` / `python verify.py 0`. Show me the real output, not
+a prediction of what it should do. If it fails, fix it and re-run until it genuinely
+passes on this machine -- don't report success without having actually run it. Do NOT
+start Phase 1 or touch anything outside Phase 0's scope, even if it seems like the
+obvious next step. When verify.py 0 genuinely passes, stop and say exactly: 'Phase 0
+complete, verify.py 0 passes -- check it locally and confirm before I continue to
+Phase 1.' Then wait. Don't proceed until I respond. Append this prompt to prompts.txt
+as instructed in CLAUDE.md."
+Plus the repo-init commands for https://github.com/Vignesh150606/Quest1.git.
+Why: Enforced the phase discipline from PHASES.md against an agent's natural tendency
+to run ahead, and -- importantly -- demanded evidence of a real local run rather than
+an asserted one, plus an explicit escalate-don't-silently-edit rule for the one test
+file that was pre-written.
+
+Outcome: Phase 0 passes. Four real environment problems surfaced, none of which were
+predictable from reading the files:
+  1. `videocr-PaddleOCR @ git+...` was rejected by pip -- the repo's package metadata
+     declares the project name `videocr`, and pip refuses a requirement whose name
+     doesn't match the built metadata. Fixed to `videocr @ git+...`, and pinned to
+     commit b56af75 rather than tracking a moving HEAD.
+  2. `paddleocr==2.10.0` does not declare `paddlepaddle` as a dependency but imports it
+     at module load, so `import paddleocr` failed with ModuleNotFoundError. Added
+     `paddlepaddle==3.0.0` explicitly (2.6.2 is built against numpy 1.x and would have
+     forced a downgrade of the rest of the stack).
+  3. ffmpeg/ffprobe were not present on the machine at all -- installed via
+     `winget install Gyan.FFmpeg` (v9.0).
+  4. **Flagged, not fixed** (per the stop-and-escalate rule): `paddle` and
+     `ctranslate2` (faster-whisper's backend) each ship their own copy of
+     `libiomp5md.dll`, the Intel OpenMP runtime. Importing paddle first poisons the
+     process and ctranslate2 then fails with `OSError: [WinError 127]`. The reverse
+     order works. tests/test_environment.py passes only because it happens to import
+     faster_whisper before paddleocr -- it asserts nothing about the ordering
+     constraint that makes it pass. Left unmodified pending the user's decision, since
+     the instruction was to flag rather than silently edit that file.
+Also pinned the remaining direct dependencies to the versions actually verified here,
+and confirmed the file reproduces from a clean venv (not just the already-warm one).
+
+---
