@@ -23,10 +23,10 @@ paddleocr==2.10.0
 # numpy 1.x and would force a downgrade).
 paddlepaddle==3.0.0
 
-# The repo is named videocr-PaddleOCR but its package metadata declares the project
-# name "videocr" (it's a fork of the original videocr, and PyPI's `videocr` is the
-# Tesseract-based upstream, not this fork). pip rejects the install if the requirement
-# name doesn't match the metadata name, so this must be `videocr @ ...`, not
-# `videocr-PaddleOCR @ ...`. Pinned to a commit -- a bare git URL tracks a moving HEAD,
-# which defeats the point of a pinned requirements file.
-videocr @ git+https://github.com/oliverfei/videocr-PaddleOCR.git@b56af756cd2fdcdb54c79037d507aa8aec3c23c5
+# videocr-PaddleOCR (the wrapper Phase 0 originally pinned around PaddleOCR) is
+# dropped as of Phase 3: it does its own frame sampling and emits SRT, which is a poor
+# fit for "find the onset of one target phrase" and gave no real control over sampling
+# or onset detection. src/ocr_track.py calls PaddleOCR directly instead, per CLAUDE.md's
+# "prefer a library's direct API over a wrapper when the wrapper adds little value."
+# Dropping it also removes the constraint that forced paddleocr==2.10.0 -- that pin is
+# kept anyway since 2.10.0 is the version actually verified against this codebase.

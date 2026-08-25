@@ -40,12 +40,17 @@ def prepare_asset(
     video_url: str, *, work_dir: Optional[str] = None, use_cache: bool = True
 ) -> VideoAsset:
     """
-    Resolve a video URL to a local VideoAsset: download, probe metadata, extract audio.
+    Resolve a video URL (or a local video file path) to a local VideoAsset: download
+    (if remote), probe metadata, extract audio.
 
     Downloads into a cache dir keyed by a hash of video_url (under work_dir, or
     $QUEST1_WORK_DIR, or ./.cache). If a complete cached result exists and use_cache is
     True, reuses it instead of re-downloading -- Phases 2/3/5/6 all re-consume the same
     video, and re-downloading a 54-minute source on every run is impractical.
+
+    If video_url is an existing local file path, yt-dlp is skipped entirely and the
+    file is probed directly -- this is what lets Phase 3's synthetic-clip test (and
+    Phase 6's offline end-to-end test) exercise the full pipeline with no network.
     """
     cache_dir = _cache_dir_for(video_url, work_dir)
     meta_path = os.path.join(cache_dir, "meta.json")
@@ -56,48 +61,53 @@ def prepare_asset(
             return cached
 
     os.makedirs(cache_dir, exist_ok=True)
-    outtmpl = os.path.join(cache_dir, "video.%(ext)s")
 
-    ydl_opts = {
-        "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-        "outtmpl": outtmpl,
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["en", "en.*"],
-        "retries": 5,
-        "fragment_retries": 5,
-        "socket_timeout": 30,
-        "quiet": True,
-        "noprogress": True,
-        "noplaylist": True,
-    }
+    if os.path.isfile(video_url):
+        video_path = os.path.abspath(video_url)
+        subtitle_paths: list[str] = []
+    else:
+        outtmpl = os.path.join(cache_dir, "video.%(ext)s")
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = _extract_info_with_retry(ydl, video_url)
+        ydl_opts = {
+            "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+            "outtmpl": outtmpl,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["en", "en.*"],
+            "retries": 5,
+            "fragment_retries": 5,
+            "socket_timeout": 30,
+            "quiet": True,
+            "noprogress": True,
+            "noplaylist": True,
+        }
 
-    video_path = _find_downloaded_video(cache_dir)
-    if video_path is None:
-        raise RuntimeError(
-            f"yt-dlp reported success for {video_url!r} but no video file was found "
-            f"in {cache_dir!r}"
-        )
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = _extract_info_with_retry(ydl, video_url)
+
+        video_path = _find_downloaded_video(cache_dir)
+        if video_path is None:
+            raise RuntimeError(
+                f"yt-dlp reported success for {video_url!r} but no video file was found "
+                f"in {cache_dir!r}"
+            )
+
+        subtitle_paths = _find_subtitle_files(cache_dir)
+        _write_subtitle_kinds(cache_dir, subtitle_paths, info)
 
     probe = _ffprobe_streams(video_path)
     if not probe["has_audio"]:
         raise RuntimeError(
-            f"Downloaded video {video_path!r} has no audio stream. This most likely "
-            f"means the format selector "
+            f"Video {video_path!r} has no audio stream. For a downloaded video this "
+            f"most likely means the format selector "
             f"'bestvideo[height<=720]+bestaudio/best[height<=720]/best' dropped the "
             f"audio track for this source (some HLS formats report audio_ext=none in "
-            f"their format list) -- the selector needs rework rather than proceeding, "
-            f"since Phase 2 (ASR) has no audio to transcribe."
+            f"their format list); for a local file it means the file itself has no "
+            f"audio track -- either way, Phase 2 (ASR) has no audio to transcribe."
         )
 
     audio_path = os.path.join(cache_dir, "audio.wav")
     _extract_audio(video_path, audio_path)
-
-    subtitle_paths = _find_subtitle_files(cache_dir)
-    _write_subtitle_kinds(cache_dir, subtitle_paths, info)
 
     metadata = VideoMetadata(
         fps=probe["fps"],

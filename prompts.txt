@@ -367,3 +367,48 @@ worth a line in APPROACH.md as a real risk on constrained evaluator machines, wh
 caused it this time.
 
 ---
+
+[Claude Code] -- "Phase 2 committed and pushed, start Phase 3 and then when can i
+start checking this locally in my machine like i must be able to upload a url then a
+text and get the output at which phase dont run tests like that require CPU without my
+permission."
+Why: Continued the phase-by-phase workflow into Phase 3, asked a legitimate scoping
+question (when does the CLI itself become usable -- answer: Phase 6, since main.py's
+run_pipeline() is what wires everything together), and set an explicit new boundary
+after the Phase 2 memory-error incident: no more long/heavy CPU runs without asking
+first, distinct from the fast offline verify.py runs already established as routine.
+
+Outcome: Implemented Phase 3 per PHASES_2_7_PLAN.md. 3a: src/__init__.py now imports
+ctranslate2 before anything else in the package, guarding the libiomp5md.dll
+import-order collision flagged in Phase 0 -- verified with a new subprocess-based test
+(test_paddle_ctranslate2_import_order_is_safe) rather than trusting the fix without
+evidence. 3b: prepare_asset() now accepts local file paths (bypasses yt-dlp entirely),
+which tests/test_ocr_track.py's scaffold already depended on. 3c: dropped videocr from
+requirements.txt and test_environment.py -- src/ocr_track.py calls PaddleOCR directly.
+3d: tests/fixtures/make_synthetic_clip.py burns in a caption via ffmpeg drawtext;
+confirmed empirically (not assumed) that font=Arial fails on this machine with
+"Fontconfig error: Cannot load default config file", exactly the gotcha
+PHASES_2_7_PLAN.md flagged, and that the fontfile= fallback works -- visually verified
+the rendered caption's legibility before trusting OCR against it. 3e: src/ocr_track.py
+-- PyAV sampler (one container reused across sampling and backward-walk refinement,
+not reopened per frame) -> PaddleOCR full-frame (no separate candidate-region detector;
+documented in the module docstring as CLAUDE.md's own "PaddleOCR's own detection-only
+mode at low sampling frequency" option, not an unexplored shortcut) -> dual per-line/
+joined-lines scoring -> temporal clustering -> backward-walk onset refinement behind a
+`refine` flag (CLAUDE.md's cutting-list item #1). Checked PaddleOCR's actual output
+shape with a single-frame smoke test before writing the parsing code against it, rather
+than guessing at the API.
+
+`python verify.py 3`: 3 passed (synthetic clip match, dedup-to-single-candidate,
+negative control), 22.75s. `python verify.py all`: Phases 0-3 genuinely OK, Phases 4-6
+correctly still skipped.
+
+Per the new CPU-permission boundary, asked before running Phase 3's remaining
+"Measurement" step (timing find_candidates over the full 54-min example video --
+~3261 PaddleOCR calls, comparable in weight to the run that hit Phase 2's memory
+error). User chose to skip it and commit Phase 3 without the measurement. Deferred
+rather than run silently or substituted with a guess -- the real OCR wall-clock time
+needed for Phase 6's short-circuit decision remains unmeasured, same open item as
+Phase 2's ASR timing.
+
+---
