@@ -20,7 +20,7 @@ import sys
 
 PHASE_TESTS = {
     0: "tests/test_environment.py::test_toolchain",
-    1: "tests/test_ingest.py::test_prepare_asset",
+    1: "tests/test_ingest.py",
     2: "tests/test_asr_track.py::test_example_video",
     3: "tests/test_ocr_track.py::test_synthetic_clip",
     4: "tests/test_arbiter.py::test_reconciliation_policy",

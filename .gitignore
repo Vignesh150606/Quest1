@@ -6,6 +6,7 @@ venv/
 .pytest_cache/
 output/
 .env
+.cache/
 
 # Video/audio/image working files -- don't commit large binaries by accident.
 # If a specific asset genuinely belongs in the repo, add an explicit exception below.

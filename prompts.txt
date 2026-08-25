@@ -252,3 +252,51 @@ Also pinned the remaining direct dependencies to the versions actually verified 
 and confirmed the file reproduces from a clean venv (not just the already-warm one).
 
 ---
+
+[Claude Code] -- "Read CLAUDE.md, PHASES.md, PHASE_CHECKLIST.md, and PHASE1_PLAN.md in
+full before touching anything. Implement Phase 1 exactly per PHASE1_PLAN.md. Don't
+start Phase 2 or touch anything outside Phase 1's scope. Actually run `python verify.py
+1` yourself and show me the real output -- don't report success without having
+actually run it. Also run `pytest -m network tests/test_ingest.py -v` at least once
+and show that output too. Append this prompt to prompts.txt per CLAUDE.md. When
+verify.py 1 genuinely passes, stop and wait for me to confirm before continuing to
+Phase 2."
+(PHASE1_PLAN.md is a copy of the plan produced in a separate planning session, itself
+grounded in live yt-dlp probes against the graded video before any code was written --
+see that plan for the four pre-verified facts it's built on.)
+Why: Same phase-discipline and evidence-over-assertion posture as the Phase 0 prompt,
+now against a plan document instead of an ad-hoc phase description, plus an explicit
+requirement to run the slow network-dependent tests at least once rather than letting
+them sit unverified behind a marker.
+
+Outcome: Implemented src/types.py (added VideoAsset.subtitle_paths), src/text_match.py
+(new module, not in PHASES.md's original Phase 1 file list -- justified in the module
+docstring: the arbiter needs consistent normalization/scoring across all three
+modalities), src/ingest.py (prepare_asset + try_subtitle_fast_path + a shared
+WebVTT/SRT cue parser), pytest.ini (network tests opt-in via a marker), a one-line
+verify.py change (Phase 1's target now runs the whole offline test file, not just the
+single network-dependent test named in PHASES.md, which would otherwise deselect to
+zero collected tests under pytest.ini's default), two hand-written subtitle fixtures,
+and a fully rewritten tests/test_ingest.py with explicit expected values throughout
+(fps==24.0, exact cue timestamps/text, etc.) rather than the original stub's `> 0`
+smoke checks.
+
+`python verify.py 1`: 9 passed, 3 deselected (the network tests), exit code 0.
+`pytest -m network tests/test_ingest.py -v`: 2 passed (archive.org, and a cache-reuse
+check), 1 failed (ok.ru) -- ok.ru's connection-reset behavior (documented in
+PHASE1_PLAN.md from earlier probing) persisted through all 3 of prepare_asset's retry
+attempts this run. Re-probed standalone immediately after with two more one-off yt-dlp
+calls: fail, then succeed -- consistent with the intermittent (not persistent) failure
+mode already documented in the plan, not a new problem. This is the plan's own
+stop-and-flag trigger ("ok.ru resets persist through 3 retries"), so it's reported
+rather than silently worked around (e.g. by adding curl_cffi/--impersonate or just
+raising the retry count) -- that's an explicit decision left to the user.
+
+Also hit and fixed one environment issue unrelated to Phase 1 logic: pytest's `tmp_path`
+fixture failed with `PermissionError` because
+`C:\Users\csrvi\AppData\Local\Temp\pytest-of-csrvi` was inaccessible even to `icacls`
+(not a normal Windows ACL/ownership issue -- access was denied to the owning user too).
+Worked around by pointing `TEMP`/`TMP` at a fresh writable directory for the test run,
+rather than modifying test code around a broken system temp path.
+
+---

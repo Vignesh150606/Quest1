@@ -30,6 +30,7 @@ class VideoAsset:
     video_path: str
     audio_path: str
     metadata: VideoMetadata
+    subtitle_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
