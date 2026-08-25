@@ -14,7 +14,7 @@ import unicodedata
 
 from rapidfuzz import fuzz
 
-DEFAULT_MATCH_THRESHOLD = 85.0  # rapidfuzz 0-100 scale
+DEFAULT_MATCH_THRESHOLD = 0.85  # 0-1 scale (matches Candidate.confidence's scale)
 
 _UNICODE_QUOTES = {
     "‘": "'", "’": "'", "‚": "'", "‛": "'",
@@ -38,10 +38,28 @@ def normalize(text: str) -> str:
 
 def similarity(target: str, candidate: str) -> float:
     """
-    Fuzzy match score (0-100) of target against candidate, after normalizing both.
+    Fuzzy match score (0-1) of target against candidate, after normalizing both.
 
     Uses partial_ratio rather than ratio: target is typically a short phrase that is a
     substring of a longer subtitle cue / transcript segment, and ratio would unfairly
-    penalize the surrounding words that aren't part of the target phrase.
+    penalize the surrounding words that aren't part of the target phrase. Use this for
+    "does this longer text contain the target" (subtitle cues, OCR'd lines) -- NOT for
+    scoring a word-window extent against the target, where partial_ratio's substring
+    tolerance makes short windows look like false-positive perfect matches. For that,
+    use window_similarity below.
     """
-    return fuzz.partial_ratio(normalize(target), normalize(candidate))
+    return fuzz.partial_ratio(normalize(target), normalize(candidate)) / 100.0
+
+
+def window_similarity(target: str, window_text: str) -> float:
+    """
+    Fuzzy match score (0-1) of target against a word window whose extent is meant to
+    match target exactly (e.g. an ASR word-window candidate for the target phrase).
+
+    Uses ratio, not partial_ratio: ratio penalizes both missing and extra content, so a
+    window that's too short or too long scores lower than one whose boundaries actually
+    align with the target. partial_ratio would score `window_similarity("my mind rebels
+    at stagnation", "my mind")` as a perfect match (1.0), since "my mind" is a substring
+    match -- exactly the false positive this function exists to avoid.
+    """
+    return fuzz.ratio(normalize(target), normalize(window_text)) / 100.0

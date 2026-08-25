@@ -300,3 +300,70 @@ Worked around by pointing `TEMP`/`TMP` at a fresh writable directory for the tes
 rather than modifying test code around a broken system temp path.
 
 ---
+
+[Claude Code] -- "Read CLAUDE.md, PHASES.md, PHASE_CHECKLIST.md, and PHASES_2_7_PLAN.md
+in full before touching anything. Implement Phase 2 exactly per PHASES_2_7_PLAN.md
+(including the 2a scale-normalization fix to Phase 1's text_match.py -- do this first,
+it's a prerequisite). Don't start Phase 3 or touch anything outside Phase 2's scope.
+Actually run `python verify.py 2` yourself and show me the real output -- don't report
+success without having run it. Also run `pytest -m network tests/test_asr_track.py -v`
+at least once and show that output, and record the measured wall-clock transcription
+time. I will Commit and push Phase 2's changes after verifying. Append this prompt to
+prompts.txt per CLAUDE.md. When verify.py 2 genuinely passes and the commit is pushed,
+stop and wait for me to confirm before continuing to Phase 3."
+Why: Same phase-discipline and evidence-over-assertion posture as Phases 0-1's prompts,
+now against PHASES_2_7_PLAN.md's Phase 2 section, plus an explicit requirement to run
+the slow real-model/real-video test at least once rather than trusting the offline
+suite alone for a claim about actual transcription accuracy/timing. Committing was
+kept as the user's own action this time, not delegated.
+
+Outcome: Fixed src/text_match.py's 0-100 vs 0-1 scale bug from Phase 1 (similarity()
+now returns fuzz.partial_ratio(...)/100.0; DEFAULT_MATCH_THRESHOLD corrected to 0.85)
+that had made tests/test_asr_track.py's and tests/test_ocr_track.py's original
+`similarity >= 0.85` assertions vacuously true against a 0-100 value -- confirmed via a
+new locked-invariant test (test_similarity_scale_is_0_to_1) and fixed the two affected
+assertions in tests/test_ingest.py. Added text_match.window_similarity (fuzz.ratio, not
+partial_ratio) alongside similarity, since partial_ratio scores a short ASR word window
+like "my mind" as a perfect 1.0 match against the full target phrase -- verified this
+false positive directly, then verified window_similarity correctly scores it 0.4.
+Implemented src/asr_track.py: WhisperModel("small", cpu, int8) with word_timestamps and
+vad_filter, a pure _match_word_windows() sliding N-1..N+2-word windows and scoring with
+window_similarity, and _dedup_overlapping() collapsing overlapping-span candidates to
+the best-scoring one. Wrote 8 offline unit tests against hand-built word lists (exact
+match, one-word-off/filler-word insertion, split-token case, below-threshold negative
+control, empty input, and 3 dedup-specific cases) -- all scores empirically verified
+via direct script runs before being written into assertions, not assumed. One test's
+first draft (an inserted extra word "right") was caught by a real, unexpected test
+failure: dedup's own (similarity, confidence) ranking picked a shorter, incomplete
+3-word window over the intended 5-word one, because ratio penalized the extra word more
+than it penalized the missing word -- fixed by re-verifying scores for several filler
+words and choosing "um", the one that empirically makes the full window win, rather
+than loosening the assertion to match the tool's first (wrong) output.
+
+`python verify.py 2`: 8 passed, 1 deselected (network), exit code 0.
+`python verify.py all`: Phases 0-2 all genuinely OK (real passes), Phases 3-6 correctly
+skipped (not yet implemented) -- confirmed no regression from Phase 1.
+
+`pytest -m network tests/test_asr_track.py -v` against the real ok.ru example video:
+first attempt failed immediately on ok.ru's already-documented intermittent connection
+reset (see Phase 1's prompts.txt entry); retried, and this time the ~1GB 720p download
+itself took over 40 minutes at ~264 KB/s from this network/CDN edge -- far slower than
+anticipated, and worth noting as a real constraint for anyone re-running this against
+ok.ru. After the full test ran for 1:07:23 wall-clock (download + model load + start of
+decode), it failed with `numpy._core._exceptions._ArrayMemoryError: Unable to allocate
+199. MiB` inside faster-whisper's own audio-decode path -- a surprisingly small
+allocation to fail on a 15.7GB machine. Checked live system memory rather than
+speculate: only 3.7GB free at the time, pagefile already active, multiple Chrome/Brave
+processes and multiple `claude` processes each consuming hundreds of MB concurrently.
+This reads as system-wide memory pressure from other running processes, not a defect in
+_match_word_windows/_dedup_overlapping (already covered by the 8 passing offline
+tests) -- reported with evidence rather than silently patched around (e.g. adding
+chunked audio decoding to src/asr_track.py to guess around a problem that may simply
+have been "too many other apps open"). User declined a retry after freeing memory,
+given verify.py 2 already passes; the real transcription wall-clock time for Phase
+3/6's OCR-cost and short-circuit decisions is therefore still unmeasured and deferred to
+a later run under less memory-constrained conditions -- and the MemoryError itself is
+worth a line in APPROACH.md as a real risk on constrained evaluator machines, whatever
+caused it this time.
+
+---

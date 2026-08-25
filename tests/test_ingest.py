@@ -17,7 +17,7 @@ import subprocess
 import pytest
 
 from src.ingest import _ffprobe_streams, _parse_subtitle_cues, prepare_asset, try_subtitle_fast_path
-from src.text_match import normalize
+from src.text_match import normalize, similarity, window_similarity
 from src.types import VideoAsset, VideoMetadata
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -48,6 +48,24 @@ def test_normalize():
     assert normalize("  Multiple   Spaces  ") == "multiple spaces"
     assert normalize("‘Curly’ “Quotes”") == "curly quotes"
     assert normalize("well—actually") == "well actually"
+
+
+def test_similarity_scale_is_0_to_1():
+    # Locks the scale so a future change can't silently reintroduce the 0-100 vs 0-1
+    # mismatch that made test_asr_track.py / test_ocr_track.py's original
+    # `similarity >= 0.85` assertions vacuously true against a 0-100 value.
+    assert similarity("hello world", "hello world") == 1.0
+    assert 0.0 <= similarity("hello world", "completely unrelated text") <= 1.0
+    assert 0.0 <= window_similarity("hello world", "hello world there") <= 1.0
+    assert window_similarity("hello world", "hello world") == 1.0
+
+
+def test_window_similarity_penalizes_partial_overlap():
+    # partial_ratio (similarity) would score this a perfect match since "my mind" is a
+    # substring hit; ratio (window_similarity) must not, since the extents differ.
+    target = "my mind rebels at stagnation"
+    assert similarity(target, "my mind") == 1.0
+    assert window_similarity(target, "my mind") < 0.85
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +110,7 @@ def test_subtitle_fast_path_hit():
     assert cand.event_type == "speech_onset"
     assert cand.timestamp == 7.0
     assert cand.end_timestamp == 9.8
-    assert cand.similarity >= 85.0
+    assert cand.similarity >= 0.85
 
 
 def test_subtitle_fast_path_fuzzy_hit():
@@ -101,7 +119,7 @@ def test_subtitle_fast_path_fuzzy_hit():
     cand = try_subtitle_fast_path(asset, "THE QUICK BROWN FOX JUMBS OVER THE LAZY DOG!!!")
     assert cand is not None
     assert cand.timestamp == 7.0
-    assert cand.similarity >= 85.0
+    assert cand.similarity >= 0.85
 
 
 def test_subtitle_fast_path_miss():
