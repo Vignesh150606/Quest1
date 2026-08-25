@@ -471,3 +471,50 @@ decode + a short ffmpeg-generated clip, not model inference). `python verify.py 
 Phases 0-5 genuinely OK, Phase 6 correctly still skipped.
 
 ---
+
+[Claude Code] -- "Phase 5 committed and pushed just verify that, start Phase 6."
+Why: Same verify-before-trust pattern as prior phase handoffs -- this is also the
+phase that answers the earlier "when can I run this myself" question.
+
+Outcome: Verified Phase 5's commit (94d225a) matches origin/main before starting.
+Implemented src/report.py's write_report() -- one report.json shape for all three
+statuses (match/ambiguous/not_found), HH:MM:SS.sss timestamp formatting per the
+problem statement's explicit output requirement, and an "ambiguous" case that reports
+the highest-match_score alternative at the top level while listing every alternative
+in "candidates" (never a silent pick). Implemented src/main.py's run_pipeline(),
+wiring ingest -> subtitle fast-path -> ASR + OCR (unconditional, both tracks) ->
+arbiter -> refine (every AmbiguousResult alternative gets its own FrameMatch + PNG,
+not just the primary) -> report. Deliberately did NOT add an automatic OCR
+short-circuit: CLAUDE.md's default architecture is the unconditional dual-track
+pipeline, and adding a confidence-based short-circuit needs the measured OCR latency
+that Phase 3 explicitly deferred -- added --skip-ocr as a manual escape hatch instead
+(documented in run_pipeline's docstring as a caller's judgment call, not an automatic
+policy), rather than silently assuming OCR is "too slow" without evidence.
+
+Wrote tests/test_end_to_end.py's write_report unit tests (all 3 statuses + 4
+timestamp-formatting edge cases including a carry-the-minute rounding case) and two
+new offline full-pipeline tests against a synthetic clip (positive match + negative
+control) -- possible end-to-end with zero network because Phase 3 taught
+prepare_asset() to accept local paths. `python verify.py 6`: 9 passed, 47.30s
+(includes real WhisperModel + real PaddleOCR inference on a ~7s clip -- fast, not the
+heavy full-video category). `python verify.py all`: Phases 0-6 all genuinely OK.
+
+Beyond the automated suite: manually invoked the actual CLI command
+(`python -m src.main --url <path> --dialogue-text "..." --output <dir>`) against a
+freshly generated synthetic clip with a distinct caption ("Sherlock finds the clue")
+neither test file uses, to prove the CLI wiring itself works, not just run_pipeline()
+called directly from tests. Correctly reported frame 75 (25fps x 3.0s exactly),
+correct timestamp, correct extracted text; inspected the actual report.json and PNG
+output by hand. This is the answer to the earlier question about when local testing
+becomes possible -- as of this phase, `python -m src.main --url <url> --dialogue-text
+"<text>"` is the real thing.
+
+Per the CPU-permission boundary, asked before running the two original scaffold tests
+against the real ok.ru video (full download + full ASR + full OCR combined -- likely
+the heaviest run yet, on top of the still-unmeasured ASR/OCR timings from Phases 2-3).
+User chose to skip and commit without it, same deferred-measurement pattern as
+Phases 2 and 3 -- the offline suite plus the manual CLI verification against a real
+(synthetic) video already demonstrate correctness; the real-video run is deferred
+rather than assumed to also pass.
+
+---
