@@ -412,3 +412,30 @@ needed for Phase 6's short-circuit decision remains unmeasured, same open item a
 Phase 2's ASR timing.
 
 ---
+
+[Claude Code] -- "Phase 3 committed and pushed just verify that, start Phase 4."
+Why: Continued the phase-by-phase workflow; asked for the commit to be independently
+verified (not just trusted from the prior turn's claim) before moving on.
+
+Outcome: Verified via git log/status/rev-list that Phase 3's commit (a6398f4) matches
+origin/main exactly (0 ahead/0 behind) before starting. Implemented src/arbiter.py's
+reconcile() per PHASES_2_7_PLAN.md: per-modality confidence thresholds + a similarity
+floor reject weak candidates outright; survivors are chained-clustered by timestamp
+(consistent with the clustering convention already used in asr_track.py/ocr_track.py);
+within a cluster the winner ranks by (confidence, similarity) descending; zero
+survivors -> None, one cluster -> its winner directly, more than one -> AmbiguousResult
+carrying every cluster's winner. Confirmed the scaffold's "higher_confidence" test case
+is satisfied by this exact policy (both its candidates share confidence=0.9, so
+similarity is the actual tiebreaker deciding the ocr-wins outcome) rather than
+adjusting the test to fit a different policy. Added 4 tests beyond the 3 unskipped
+scaffold cases per the plan: empty input -> None, all-candidates-below-threshold (one
+failing on similarity, one on confidence) -> None, three widely-separated clusters ->
+AmbiguousResult with exactly 3 candidates spanning all three modalities, and an
+exact-tie case asserting the same winner across 5 repeated calls (determinism, not
+just correctness once).
+
+`python verify.py 4`: 7 passed, 0.17s (pure unit tests, no model/network involved).
+`python verify.py all`: Phases 0-4 genuinely OK, Phases 5-6 correctly still skipped --
+confirmed no regression from Phases 1-3.
+
+---

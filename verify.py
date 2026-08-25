@@ -23,7 +23,7 @@ PHASE_TESTS = {
     1: "tests/test_ingest.py",
     2: "tests/test_asr_track.py",
     3: "tests/test_ocr_track.py",
-    4: "tests/test_arbiter.py::test_reconciliation_policy",
+    4: "tests/test_arbiter.py",
     5: "tests/test_refine.py::test_frame_accuracy",
     6: "tests/test_end_to_end.py",
 }
