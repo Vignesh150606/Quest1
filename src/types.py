@@ -23,6 +23,11 @@ class VideoMetadata:
     duration_s: float
     width: int
     height: int
+    # False for a genuinely audio-only asset -- real on some hosts (e.g. YouTube
+    # exposes true audio-only formats; ok.ru does not). fps/width/height are 0 when
+    # False. Callers needing an actual frame (refine.to_frame_match) must escalate to
+    # a video-containing tier first -- see main.py's run_pipeline.
+    has_video: bool = True
 
 
 @dataclass

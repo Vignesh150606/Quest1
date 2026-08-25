@@ -518,3 +518,315 @@ Phases 2 and 3 -- the offline suite plus the manual CLI verification against a r
 rather than assumed to also pass.
 
 ---
+
+[Claude Code] -- (retroactive entry -- this work happened in the session but wasn't
+logged at the time; added now on independent review catching the gap, see the
+RUNTIME_AUDIT.md entry below.) User asked to actually run the CLI against the real
+ok.ru video with the real target phrase ("python -m src.main --url ... add the url
+ok.ru and also the text and it must run faster like not hours of time"), using a
+video/audio download already cached from an earlier session. The run appeared stuck
+(near-zero CPU for 16+ minutes); investigated rather than assumed -- found TWO
+processes (a thin launcher stub and the real worker), and the real worker had in fact
+burned real CPU time with no crash. Continued monitoring; it eventually failed with
+`numpy.core._exceptions._ArrayMemoryError: Unable to allocate 199. MiB` inside
+faster-whisper's own decode_audio(), consistent with the earlier-documented memory-
+pressure finding. User then asked "is there a way to make this quicker... even after
+skipping OCR it takes this much time" and "can I do something without this memory
+requirement... only for voice?"
+
+Why: Direct, first-hand evidence (not assumption) that the plain WhisperModel API's
+decode_audio() -- which reads the ENTIRE audio file into one contiguous float32 array
+up front -- was both slow and capable of failing outright under real memory pressure.
+
+Outcome: Implemented chunked audio decoding in src/asr_track.py: audio.wav (already
+16kHz mono PCM S16LE, guaranteed by ingest.py) is read via stdlib `wave` in bounded
+~600s chunks with 10s overlap between consecutive chunks (so a phrase spanning a chunk
+boundary is still captured whole in at least one chunk; the existing dedup logic
+collapses the resulting duplicate detection for free), each chunk passed directly to
+faster-whisper as a numpy ndarray -- verified directly against the installed
+faster-whisper's own source (not assumed) that passing an ndarray skips its internal
+decode_audio() call entirely (`if not isinstance(audio, np.ndarray): audio =
+decode_audio(...)`), and that its expected format (16kHz, float32, int16/32768.0
+normalization) exactly matches what ingest.py already produces. This bounds the
+largest single allocation to one chunk's size (~39MB) regardless of total audio
+length, independent of total system memory pressure. Verified with a real forced test:
+constructed an index-encoded synthetic WAV, asserted exact chunk boundaries, exact
+overlap length (an early draft doubled the actual overlap by not clamping the first
+chunk's read to its own nominal end -- caught by hand-tracing the arithmetic, not by
+the test after the fact), and exact int16->float32 normalization against known extreme
+values.
+
+Then, per "make it faster" (measured ~20min+ for one real run, later re-measured
+precisely during the runtime-hardening pass below): added faster_whisper's
+BatchedInferencePipeline (wraps the same WhisperModel, batches VAD-detected segments
+through the model together instead of one at a time -- same weights, no accuracy
+trade-off from batching alone) and reduced beam_size from faster-whisper's default of
+5 to 1 (greedy decoding -- a real, acknowledged accuracy/speed trade-off, accepted
+because the pipeline fuzzy-matches the output rather than requiring a word-perfect
+transcript). Verified BatchedInferencePipeline's actual API (accepts the same
+ndarray/path/BinaryIO union, same Segment/Word return shape) directly against the
+installed package before relying on it, via a smoke test on real (silent) audio
+confirming correct empty-result VAD behavior with no errors.
+
+User then asked to actually run the real CLI end-to-end with these changes; while that
+run was in progress (confirmed via real CPU accumulation, not assumed complete), user
+asked to instead stop it and defer to a later, more thorough pass -- which became the
+runtime-hardening session logged below, where the ASR chunking/batching work above got
+its first real precise measurement (11.2min for the full audio via a bounded 180s
+slice, 4.85x realtime) rather than just the informal "well over 20 minutes" estimate
+this entry is retroactively documenting.
+
+`python verify.py 2`: all offline tests (including 3 new tests for the chunking logic)
+passed at the time. No dedicated network timing run was completed in this session for
+this specific change alone -- superseded by the more thorough measurement below.
+
+---
+
+[Claude Code] -- "@RUNTIME_AUDIT.md I am providing the Runtime Forensic Audit from an
+independent review of the current Quest1 repository. Read the audit together with the
+current codebase. I now want you to implement the necessary runtime/performance
+improvements, with the primary goal of minimizing the recruiter's end-to-end waiting
+time while preserving correctness and generalization." Plus explicit constraints:
+verify audit findings against actual code before acting, measure bottlenecks before
+optimizing, no API-key work (audit found none needed), never hardcode the example
+dialogue/URL, don't remove ASR/OCR correctness for speed, don't over-engineer, prefer
+the smallest change with meaningful impact, add stage-level progress output, add
+defensive timeouts/bounds where genuinely unbounded, fix documented-vs-actual gaps
+(especially the subtitle fast-path), keep tests passing, verify Docker compatibility
+and the Python-version mismatch, explain trade-offs and get approval before any major
+architectural change, and report per-change: what was slow, evidence, what changed,
+why it improves runtime, accuracy impact, before/after measurement, tests performed,
+remaining bottlenecks.
+Why: An independent audit is exactly the kind of external check CLAUDE.md's own
+"stop and flag if evidence disproves an assumption" philosophy is built for -- worth
+taking seriously and verifying claim-by-claim, not either blindly implementing every
+recommendation or dismissing it.
+
+Outcome: Verified every audit claim against the actual code (all confirmed accurate)
+before acting on any of them. Then measured, rather than assumed, the two costliest
+stages directly against the real cached ok.ru video already on disk (no re-download
+needed): OCR's per-sample seek+decode cost 0.484s/sample (26.3min for 3,261 samples)
+-- MORE than the OCR inference itself (0.334s/sample, 18.2min) -- directly
+contradicting the audit's own §6 assumption that seeking was cheap relative to OCR.
+Sequential decode with PyAV's thread_type="AUTO" measured 686fps (1.9min for the whole
+video). ASR measured 4.85x realtime (11.2min for the full audio) via a bounded 180s
+slice using the already-built chunking/batching code.
+
+User then proposed skipping the video download for ASR entirely, since ASR only needs
+audio; verified directly (re-probed ok.ru's format list, checked actual vcodec/acodec
+fields not just the unreliable audio_ext label) that ok.ru exposes no genuine
+audio-only stream -- every format has empty vcodec/acodec. Reported this finding
+rather than silently building around the original premise, then proposed the
+adjacent, still-valid design it enabled: a two-tier fetch (cheapest available format
+first, escalate to the existing height<=720 format only if OCR actually ends up
+needed), which the user approved along with an OCR short-circuit (skip OCR on a
+confident subtitle/ASR hit, reusing arbiter.reconcile()'s own logic) and a two-stage
+output-frame-quality design (fast/low-res by default, an opt-in --hq-frame flag for a
+follow-up higher-quality re-fetch). Wrote a full plan documenting the measured
+evidence and both approved decisions before implementing, per the explicit
+get-approval-before-major-architectural-changes instruction.
+
+Implemented and verified with real evidence, not assumption, throughout:
+- src/ocr_track.py: sequential-decode frame sampler (same fixed-grid semantics as the
+  seek-based version, zero accuracy impact -- verified via 2 new regression tests
+  locking in exact grid positions and exact-overlap bounds); bounded
+  _backward_walk_refine (was a genuinely unbounded while True); periodic progress
+  printing.
+- src/ingest.py: prepare_asset(tier="low"|"high"), _format_selector_for_tier()
+  ("bestaudio/worst" / the existing height<=720 selector); a legacy-cache migration
+  (verified against the REAL existing ~1GB cached video -- confirmed 0.001s cache hit,
+  no re-download, meta.json correctly upgraded); timeout= added to both subprocess.run
+  calls (ffprobe, ffmpeg), verified with real forced-timeout tests, not just checking
+  the parameter exists.
+- src/main.py: staged short-circuit (subtitle confident -> skip ASR+OCR; ASR confident
+  -> skip OCR; inconclusive -> run OCR as before) -- this also fixes the audit's
+  documented-vs-actual gap (CLAUDE.md's "subtitle fast-path skips two expensive
+  stages" was never actually wired up); --hq-frame flag; [N/5] stage progress prints.
+  Verified with 6 new monkeypatched control-flow tests (one per branch) plus the
+  9 pre-existing offline tests, all passing with zero regressions.
+- Dockerfile: python:3.11-slim -> python:3.12-slim, matching requirements.txt's own
+  stated verification target. Docker itself is not installed on this machine, so the
+  image build/run could NOT be verified in this environment -- disclosed rather than
+  claimed as tested.
+- README.md: documented the -v cache-mount pattern for Docker (video/audio cache, HF
+  hub cache, PaddleOCR cache) so a fresh container doesn't silently re-pay every
+  download/model cost on every invocation.
+
+Real measured result on the actual cached video: the low-tier fetch (new capability)
+took 90.0s and produced a 45MB file, versus the ~40min/~1GB high-tier download it
+replaces for the common ASR-confident case -- confirmed audio.wav's mtime was
+untouched (reused, not re-extracted) after the low-tier fetch.
+
+`python verify.py all`: every phase's offline suite passed with zero regressions after
+every file change in this pass.
+
+---
+
+[Claude Code] -- "https://youtu.be/6Yyh7dqQd_c give a cmd with this link and the text
+it must find is 'I am the one who shall decide' but the catch is this is a japanese
+video but it has subtitles in video can the cli catch it and then about our download
+this is just a link and then how will it download that or how will it proceed if you
+can run this yourselves and verify then also ok."
+Why: A genuinely different real-world video -- different host (YouTube, not ok.ru),
+different language (Japanese audio), burned-in (not track-based) English fansub text,
+explicitly requested as a real generalization test, with explicit permission to run
+it for real. This is exactly the "evaluator may swap in a different video" scenario
+CLAUDE.md requires the solution to handle, and the ok.ru-only test history up to this
+point had never actually exercised it.
+
+Outcome: Probed the video read-only first (yt-dlp -J, no download) rather than assume:
+confirmed no real subtitle track (the "[English Sub]" in the title is burned into the
+frame, not a downloadable track), Japanese-language audio, and -- unlike ok.ru --
+genuine audio-only formats actually available (real vcodec=None/acodec=set entries),
+a live test of tier="low"'s primary "bestaudio" branch rather than just its "worst"
+fallback (all that ok.ru ever exercised).
+
+Running it for real surfaced THREE genuine bugs no synthetic-clip or ok.ru-based test
+had ever caught, each found, root-caused, fixed, and covered with new tests before
+moving on -- not patched superficially:
+
+1. Crash: "No video stream found in video_low.webm". Root cause: tier="low" correctly
+   picked a genuine audio-only YouTube format (exactly as designed), but
+   _ffprobe_streams unconditionally required a video stream to exist and raised when
+   it didn't -- a real gap in the two-tier design that ok.ru's total lack of an
+   audio-only option had accidentally masked during all earlier testing. Fixed:
+   VideoMetadata gained has_video: bool; _ffprobe_streams returns has_video=False
+   (zeroed fps/width/height) instead of raising; run_pipeline now escalates to
+   tier="high" before refine whenever the current asset has no video, regardless of
+   --hq-frame -- a correctness requirement (every result needs an output frame image),
+   not the existing quality-preference flag. 2 new tests (real audio-only ffprobe
+   call; a full run_pipeline escalation test via a fabricated has_video=False asset).
+
+2. Crash: "Failed to extract/download... HTTP Error 429: Too Many Requests" on the
+   'en' subtitle endpoint, consistently, all 3 retry attempts. Root cause:
+   _extract_info_with_retry blindly retried the IDENTICAL already-rate-limited
+   subtitle request 3 times: YouTube was rate-limiting subtitle fetches specifically
+   (likely from this session's own repeated testing of the same URL), and the
+   existing retry loop had no way to distinguish "subtitle problem" from "video/audio
+   problem." Fixed: _extract_info_with_subtitle_fallback -- on a subtitle-specific
+   failure (string-matched against yt-dlp's known error phrasing), retries the SAME
+   download fresh with subtitles disabled entirely, rather than repeating the
+   identical failing request; a genuine non-subtitle failure still propagates
+   unchanged. 5 new offline tests (classification, fallback-fires, no-fallback-needed,
+   non-subtitle-error-still-raises), all via monkeypatched yt_dlp.YoutubeDL -- no
+   network needed to verify the control flow. Verified live against the real,
+   actually-occurring rate limit: fired correctly twice (once per tier fetch) in the
+   subsequent real run, gracefully degraded both times instead of crashing.
+
+3. Silent incorrectness (not a crash) -- the most important find of the three: the
+   real run completed successfully, but reported status="ambiguous" with the matched
+   text simply "O" and 45 disagreeing candidate clusters, for a target phrase with no
+   relation to a single letter. Root-caused rather than dismissed: rapidfuzz's
+   partial_ratio (used for OCR line matching) finds the best alignment of the SHORTER
+   of its two strings within the longer one -- for a 1-character OCR misread (a
+   watermark/logo artifact, plausible for a fansubbed anime video with a persistent
+   channel bug), that means a trivial, meaningless perfect match, confirmed directly:
+   similarity("I am the one who shall decide", "O") == 1.0. This is exactly the class
+   of over-fit-to-the-example bug CLAUDE.md warns about: the graded example never
+   exercises OCR at all (no on-screen caption at the target timestamp), so this had
+   been completely latent through every prior test and real run. Fixed:
+   _score_lines now requires an OCR candidate's normalized length to be at least half
+   the target phrase's own length before it's even scored -- a genuine on-screen
+   match for a full phrase is never drastically shorter than the phrase itself. 3 new
+   tests (rejects the exact reproduced "O" case, still matches a genuine short
+   target, still matches a genuine full-length line -- the last one guarding against
+   the fix itself breaking the normal case).
+
+The arbiter's own "never silently pick one and hide the disagreement" design is worth
+noting separately: even with the OCR bug live, it correctly reported AmbiguousResult
+rather than confidently asserting "O" as the answer -- the safety net worked as
+designed even while the upstream bug it was catching went unfixed. That doesn't make
+the upstream bug acceptable, but it's evidence the arbiter's defensive design earns
+its complexity.
+
+`python verify.py 1`, `python verify.py 3`, and `python verify.py all`: all green
+after each fix, zero regressions. Re-ran the real YouTube CLI end-to-end after fixes
+1 and 2 (subtitle fallback verified live, twice) but NOT after fix 3 (the OCR
+false-positive fix) -- that would cost another ~45min of identical ASR+OCR compute for
+only the scoring logic to differ, and the bug is already directly reproduced and
+fixed with passing tests; user explicitly chose to skip the re-run rather than spend
+the time, deferring the actual corrected final answer for this specific video to a
+later real run if wanted.
+
+---
+
+Session prompt: user raised a doubt that the ok.ru example video had only ever been
+verified against an already-downloaded cache from earlier sessions, never proving the
+tool works from "only text and link of the video." Agreed this was a real, important
+gap -- none of the 3 YouTube-discovered bug fixes above had ever been exercised
+against ok.ru at all, warm or cold. Proposed a fresh, empty --work-dir (not touching
+the existing valuable cache) to test the cold-start path honestly. User's reply:
+"Okay i think it will run, next i will provide a english youtube video and a text so
+it must catch that easily by ASR" -- chose to trust the shared download code path
+(already exercised via the low/high-tier measurements) rather than spend the ~15-20min
+re-running it, and moved straight to a new real test instead.
+
+Session prompt: user provided a second real generalization test --
+https://youtu.be/JGwWNGJdvx8 ("Ed Sheeran - Shape of You (Official Music Video)"),
+target phrase "I'm in love with the shape of you". Probed the video read-only first
+(yt-dlp -J, no download): 263s, real 'en' subtitle track available. Ran the real CLI
+end-to-end (permitted implicitly, following the same pattern as the earlier YouTube
+test where the user authorized real runs). This surfaced two more real bugs, both
+found by running against a genuinely different real video rather than assumed:
+
+1. Silent incorrectness (subtitle track discarded despite existing on disk) -- the
+   real run reported status="not_found" even though the video's actual YouTube
+   caption track contains the exact target phrase verbatim ("I'm in love with the
+   shape of you"). Root-caused by direct inspection, not guesswork: yt-dlp's
+   subtitleslangs=["en", "en.*"] pulled in auto-translated caption variants
+   ("en-hi", "en-fil") alongside the genuine English track; those translated variants
+   got rate-limited (HTTP 429), and yt-dlp raised for the WHOLE extract_info() call
+   even though it had already successfully written the real 'en'/'en-orig'/'en-en'
+   .vtt files to disk earlier in that same call. The existing subtitle-429 fallback
+   (from the prior YouTube test's Bug 2 fix) correctly avoided crashing the pipeline
+   by retrying without subtitles, but returned subtitles_requested=False -- and
+   prepare_asset() trusted that flag as "don't even look for subtitle files on disk",
+   discarding real, already-downloaded captions that were sitting right there.
+   Confirmed directly: parsed the actual cached .vtt file, found the cue
+   "I'm in love with the shape of you" at 00:00:57.182-58.934, and confirmed
+   try_subtitle_fast_path() scores it 1.0 when given the real file. Fixed:
+   prepare_asset() now always checks disk for subtitle files (one cheap listdir on a
+   hash-scoped cache dir) regardless of the subtitles_requested flag, since disk state
+   is ground truth and the flag can undercount it. New offline regression test
+   reproduces the exact failure mode (pre-writes a real .vtt to a cache dir, mocks the
+   fallback to return subtitles_requested=False, asserts prepare_asset still finds and
+   uses it). Verified live end-to-end, twice: once with the stale cache (reproduced
+   the bug -- confirmed it was hitting the exact code path diagnosed, not something
+   else), then again after clearing that one cache entry and re-downloading fresh --
+   subtitle fast-path fired correctly, status="match", frame 1371, timestamp
+   00:00:57.182, similarity 1.0, skipping ASR and OCR entirely as designed.
+
+2. Crash-on-report (not a wrong answer, but a real reliability bug) -- immediately
+   after finding the correct match above, the CLI crashed with UnicodeEncodeError
+   while printing the final "Text:" summary line: the extracted caption text contains
+   a musical note character (an on-screen "♪" convention this video's captions use),
+   and Windows' default console codepage (cp1252) can't encode it. The underlying
+   report.json and the extracted PNG frame were both written correctly and completely
+   (confirmed by reading report.json directly) -- only the stdout/stderr summary
+   crashed, meaning a recruiter running this from a plain Windows terminal (the
+   documented local-Python fallback path, not just Docker) would see a Python
+   traceback instead of the answer, on any video whose dialogue/captions contain a
+   character outside their terminal's codepage (accents, curly quotes, musical notes,
+   non-Latin scripts, etc. -- not an exotic edge case). Fixed with the smallest
+   possible change: main() now calls sys.stdout.reconfigure(errors="replace") and the
+   same for sys.stderr, right after entry, so an unencodable character is silently
+   replaced instead of crashing the whole run -- regardless of the evaluator's
+   console codepage, and without changing report.json's encoding (already UTF-8 via
+   json.dump, unaffected either way). New test monkeypatches sys.stdout/stderr with
+   fake streams exposing a reconfigure() method and asserts main() calls it with
+   errors="replace" on both -- decoupled from the test runner's own actual console
+   encoding, which pytest's own capture makes unreliable to test against directly.
+   Verified live: re-ran the same real video against the now-correctly-cached asset;
+   printed the full summary cleanly (musical notes rendered as "?" on this console
+   instead of crashing) and exited 0.
+
+`python verify.py all`: green after each fix (8/8 phases), including both new tests.
+Both fixes verified with real, non-synthetic data throughout -- the real downloaded
+.vtt file's actual cue text, and a real crash reproduced by running the real pipeline
+end-to-end -- not just synthetic fixtures. This is the second real-video
+generalization test (after the earlier Japanese-audio/English-fansub one) to surface
+genuine bugs the graded ok.ru example alone could never have exposed: that example
+ships no subtitle track at all, so the entire subtitle fast-path -- including both
+bugs found here -- had zero real-world exercise before this session.
+
+---

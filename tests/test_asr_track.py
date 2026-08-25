@@ -12,9 +12,19 @@ example video:
     pytest -m network tests/test_asr_track.py -v
 """
 
+import struct
+import wave
+
+import numpy as np
 import pytest
 
-from src.asr_track import _Word, _dedup_overlapping, _match_word_windows, find_candidates
+from src.asr_track import (
+    _iter_audio_chunks,
+    _Word,
+    _dedup_overlapping,
+    _match_word_windows,
+    find_candidates,
+)
 from src.ingest import prepare_asset
 from src.types import Candidate
 
@@ -156,6 +166,113 @@ def test_dedup_overlapping_keeps_separate_non_overlapping_groups():
 
 def test_dedup_overlapping_empty_input():
     assert _dedup_overlapping([]) == []
+
+
+# ---------------------------------------------------------------------------
+# _iter_audio_chunks -- memory-bounded chunked audio decoding
+# ---------------------------------------------------------------------------
+
+
+def _write_test_wav(path: str, num_samples: int, sample_rate: int = 16000) -> None:
+    """
+    16-bit mono PCM WAV where sample i has value (i % 30000) -- an index-encoded
+    signal, so overlap correctness between chunks can be verified by comparing sample
+    VALUES against their expected position in the original signal, not just lengths.
+    """
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        samples = [i % 30000 for i in range(num_samples)]
+        wf.writeframes(struct.pack(f"<{num_samples}h", *samples))
+
+
+def test_iter_audio_chunks_offsets_and_bounded_size(tmp_path):
+    sample_rate = 16000
+    duration_s = 5.0
+    wav_path = str(tmp_path / "chunks.wav")
+    _write_test_wav(wav_path, int(duration_s * sample_rate), sample_rate)
+
+    chunk_duration_s, overlap_s = 2.0, 0.5
+    chunks = list(_iter_audio_chunks(wav_path, chunk_duration_s, overlap_s))
+
+    # 5s of audio at 2s nominal chunk width -> chunk starts at 0, 2, 4 -> 3 chunks.
+    # Each chunk after the first is preceded by overlap_s of look-back, hence offsets
+    # 1.5 and 3.5 rather than 2.0 and 4.0.
+    assert [round(offset, 6) for offset, _ in chunks] == [0.0, 1.5, 3.5]
+
+    # Peak size must never exceed (chunk_duration_s + overlap_s) worth of samples --
+    # this bound is the entire point: it's what keeps the largest single allocation
+    # small regardless of total audio length.
+    max_samples = int((chunk_duration_s + overlap_s) * sample_rate)
+    for _, samples in chunks:
+        assert len(samples) <= max_samples
+
+
+def test_iter_audio_chunks_overlap_is_exact_not_doubled(tmp_path):
+    # Regression guard: an earlier draft of this function read chunk_duration+overlap
+    # for every chunk unconditionally -- including the first, which has nothing before
+    # it to overlap with -- making the ACTUAL shared region between consecutive chunks
+    # ~2x overlap_s instead of overlap_s. Caught by hand-tracing the arithmetic (and
+    # cross-checked with a standalone script) before writing this test, not by the test
+    # finding it after the fact -- kept here so a future change can't silently
+    # reintroduce it.
+    #
+    # A first draft of this test asserted offset deltas were uniformly
+    # chunk_duration_s - overlap_s, which is wrong: the first chunk's read_start is
+    # clamped at 0 (it would otherwise be negative), so only the delta *into* chunk 1
+    # equals chunk_duration - overlap; later deltas equal chunk_duration exactly, since
+    # they aren't clamped. The real invariant -- and the one that actually catches the
+    # doubling bug -- is the INTERSECTION between each consecutive pair's spans, not
+    # the gap between their start offsets. That's what's checked below.
+    sample_rate = 16000
+    wav_path = str(tmp_path / "chunks.wav")
+    _write_test_wav(wav_path, int(5.0 * sample_rate), sample_rate)
+
+    chunk_duration_s, overlap_s = 2.0, 0.5
+    chunks = list(_iter_audio_chunks(wav_path, chunk_duration_s, overlap_s))
+    assert len(chunks) == 3
+
+    # The first chunk has nothing before it to overlap with, so it must be exactly
+    # chunk_duration_s long. Under the buggy version this was chunk_duration_s +
+    # overlap_s (2.5s of samples instead of 2.0s).
+    first_offset, first_samples = chunks[0]
+    assert first_offset == 0.0
+    assert len(first_samples) == int(chunk_duration_s * sample_rate)
+
+    overlap_samples = int(overlap_s * sample_rate)
+    spans = [
+        (round(offset * sample_rate), round(offset * sample_rate) + len(samples))
+        for offset, samples in chunks
+    ]
+    for (a_start, a_end), (b_start, b_end) in zip(spans, spans[1:]):
+        intersection = max(0, min(a_end, b_end) - max(a_start, b_start))
+        assert intersection == overlap_samples
+
+    # And the shared region decodes identical underlying samples (the index-encoded
+    # test signal makes this an exact value check, not just a length check).
+    for (_, samples_a), (_, samples_b) in zip(chunks, chunks[1:]):
+        np.testing.assert_array_equal(samples_a[-overlap_samples:], samples_b[:overlap_samples])
+
+
+def test_iter_audio_chunks_normalization_matches_faster_whisper(tmp_path):
+    # int16 max value should map to just under 1.0 (32767/32768), and -32768 to
+    # exactly -1.0 -- matching faster_whisper.audio.decode_audio()'s own
+    # `astype(np.float32) / 32768.0` conversion exactly (verified against the
+    # installed package's source, not assumed).
+    sample_rate = 16000
+    wav_path = str(tmp_path / "extremes.wav")
+    with wave.open(wav_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(struct.pack("<2h", 32767, -32768))
+
+    chunks = list(_iter_audio_chunks(wav_path, chunk_duration_s=10.0, overlap_s=0.0))
+    assert len(chunks) == 1
+    samples = chunks[0][1]
+    assert abs(samples[0] - (32767 / 32768.0)) < 1e-6
+    assert samples[1] == -1.0
 
 
 # ---------------------------------------------------------------------------

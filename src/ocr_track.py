@@ -16,6 +16,15 @@ add a second detector on top of the one already running, for no measured benefit
 sample rate used here (default 1 sample/sec). See APPROACH.md for the actual
 measurement that would justify reaching for something heavier.
 
+Frame sampling (hardening added post-Phase-6, runtime audit): a real measurement against
+the ~54min example video found per-timestamp seeking (`_decode_frame_at` called 3,261
+times) cost MORE than the OCR inference itself -- 0.484s/sample seek+decode vs.
+0.334s/sample OCR (26.3min vs. 18.2min total). A single sequential forward decode pass
+(`stream.thread_type = "AUTO"`, PyAV's own frame/slice threading) measured 686fps --
+the whole video decoded in 1.9min. `_sample_frames` below uses that sequential pass
+instead of seeking, selecting the identical frames (same fixed time grid) at a fraction
+of the cost -- a pure throughput fix, zero accuracy impact.
+
 Verification (see PHASES.md): pytest tests/test_ocr_track.py::test_synthetic_clip
 """
 
@@ -61,6 +70,7 @@ def find_candidates(
     sample_interval_s: float = 1.0,
     refine: bool = True,
     threshold: float = DEFAULT_MATCH_THRESHOLD,
+    max_backward_s: float = 30.0,
 ) -> list[Candidate]:
     """
     Sample frames at sample_interval_s, OCR each with PaddleOCR full-frame, fuzzy-match
@@ -69,7 +79,9 @@ def find_candidates(
     the coarse sample grid to the exact frame where the text first appears.
 
     refine is a flag (not always-on) because it's CLAUDE.md's cutting-list item #1 --
-    if OCR proves too slow in practice, this is the first thing to disable.
+    if OCR proves too slow in practice, this is the first thing to disable. max_backward_s
+    bounds that walk (see _backward_walk_refine's docstring) -- it was previously
+    unbounded.
     """
     with av.open(asset.video_path) as container:
         stream = container.streams.video[0]
@@ -89,7 +101,13 @@ def find_candidates(
 
             if refine:
                 onset_time = _backward_walk_refine(
-                    container, stream, asset.metadata.fps, onset_time, target_phrase, threshold
+                    container,
+                    stream,
+                    asset.metadata.fps,
+                    onset_time,
+                    target_phrase,
+                    threshold,
+                    max_backward_s,
                 )
 
             confidence = _confidence_for_text(best_sample.lines, best_text)
@@ -115,17 +133,49 @@ def find_candidates(
     return candidates
 
 
+_PROGRESS_INTERVAL_S = 30.0  # print an OCR progress line at most this often (video time)
+
+
 def _sample_frames(container: av.container.InputContainer, stream, interval_s: float):
-    """Yield one OCR'd _Sample per interval_s across the whole video."""
+    """
+    Yield one OCR'd _Sample per interval_s across the whole video, via a single
+    sequential forward decode pass -- NOT a seek-per-timestamp loop (see module
+    docstring for the measurement that motivated this).
+
+    thread_type = "AUTO" enables PyAV's own frame/slice-level decode threading, which is
+    what produced the measured 686fps sequential-decode throughput.
+
+    Fixed-grid semantics preserved exactly from the original seek-based version: target
+    query points are 0, interval_s, 2*interval_s, ... regardless of which decode
+    strategy reaches them, so the set of frames selected is unchanged -- this is a
+    throughput fix, not a behavior change.
+    """
     duration_s = _stream_duration_s(container, stream)
-    t = 0.0
-    while t < duration_s:
-        frame = _decode_frame_at(container, stream, t)
-        if frame is not None:
-            bgr = frame.to_ndarray(format="bgr24")
-            lines = _ocr_frame(bgr)
-            yield _Sample(time_s=t, lines=lines)
-        t += interval_s
+    stream.thread_type = "AUTO"
+
+    next_target = 0.0
+    last_progress_at = 0.0
+    for frame in container.decode(stream):
+        if frame.pts is None:
+            continue
+        frame_time = float(frame.pts * stream.time_base)
+        if frame_time < next_target:
+            continue
+
+        bgr = frame.to_ndarray(format="bgr24")
+        lines = _ocr_frame(bgr)
+        yield _Sample(time_s=frame_time, lines=lines)
+
+        if frame_time - last_progress_at >= _PROGRESS_INTERVAL_S:
+            if duration_s > 0:
+                pct = 100 * frame_time / duration_s
+                print(f"    OCR: {frame_time:.0f}s / {duration_s:.0f}s ({pct:.0f}%)", flush=True)
+            else:
+                print(f"    OCR: {frame_time:.0f}s processed", flush=True)
+            last_progress_at = frame_time
+
+        # Next point on the fixed grid strictly after this frame.
+        next_target = (int(frame_time / interval_s) + 1) * interval_s
 
 
 def _stream_duration_s(container: av.container.InputContainer, stream) -> float:
@@ -158,6 +208,18 @@ def _ocr_frame(frame_bgr: np.ndarray) -> list:
     return [(text, float(conf)) for _, (text, conf) in result[0]]
 
 
+# Real bug, found by running against a real (non-example) video: rapidfuzz's
+# partial_ratio finds the best alignment of the SHORTER of its two strings within the
+# longer one -- a 1-character OCR misread (e.g. a stray logo/watermark artifact)
+# scores a PERFECT 1.0 against almost any target phrase, since that single character
+# is almost always present somewhere in it. Verified directly:
+# similarity("I am the one who shall decide", "O") == 1.0. Guard against this by
+# requiring an OCR candidate text to be at least this fraction of the target phrase's
+# own (normalized) length before it's even scored -- a genuine on-screen match for the
+# full target phrase is never drastically shorter than the phrase itself.
+_MIN_CANDIDATE_LENGTH_RATIO = 0.5
+
+
 def _score_lines(target_phrase: str, line_texts: list[str]) -> tuple[float, str]:
     """
     Score target against each OCR'd line individually AND against all lines joined
@@ -165,11 +227,22 @@ def _score_lines(target_phrase: str, line_texts: list[str]) -> tuple[float, str]
     similarity (partial_ratio), not window_similarity: a line legitimately containing
     the target as a substring (surrounded by other on-screen text) is a real match,
     unlike the ASR word-window case that window_similarity exists to guard against.
+
+    Candidates shorter than _MIN_CANDIDATE_LENGTH_RATIO of the target's length are
+    excluded before scoring -- see that constant's comment for why.
     """
     if not line_texts:
         return 0.0, ""
+    target_len = len(normalize(target_phrase))
+    min_len = target_len * _MIN_CANDIDATE_LENGTH_RATIO
     candidate_texts = list(line_texts) + [" ".join(line_texts)]
-    scored = [(similarity(target_phrase, t), t) for t in candidate_texts]
+    scored = [
+        (similarity(target_phrase, t), t)
+        for t in candidate_texts
+        if len(normalize(t)) >= min_len
+    ]
+    if not scored:
+        return 0.0, ""
     return max(scored, key=lambda st: st[0])
 
 
@@ -216,20 +289,28 @@ def _backward_walk_refine(
     onset_time: float,
     target_phrase: str,
     threshold: float,
+    max_backward_s: float = 30.0,
 ) -> float:
     """
     Step backward frame-by-frame from onset_time while the target phrase still
     OCR-matches, to find the true onset frame rather than reporting the coarse
     sample_interval_s grid point that happened to hit it. CLAUDE.md cutting-list item
     #1 -- this is exactly what the `refine` flag disables if OCR proves too slow.
+
+    Bounded to max_backward_s (default 30s) of walk-back -- runtime-audit finding: this
+    loop's only exits were previously a below-threshold score, t=0, or a decode failure,
+    with no cap on distance/steps. A slowly-fading caption or a permissive threshold
+    could otherwise walk arbitrarily far back with no bound. 30s is generous relative to
+    any real on-screen caption's duration while guaranteeing termination.
     """
     if fps <= 0:
         return onset_time
     frame_period = 1.0 / fps
+    earliest_allowed = max(0.0, onset_time - max_backward_s)
     t = onset_time
     while True:
         prev_t = t - frame_period
-        if prev_t < 0:
+        if prev_t < earliest_allowed:
             break
         frame = _decode_frame_at(container, stream, prev_t)
         if frame is None:

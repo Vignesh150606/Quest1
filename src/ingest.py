@@ -7,6 +7,16 @@ Produces: VideoAsset; optional Candidate(modality="subtitle") on fast-path hit
 Verification (see PHASES.md): pytest tests/test_ingest.py
 (Phase 1's real network-dependent check is `pytest -m network tests/test_ingest.py`;
 verify.py 1 runs the offline suite -- see PHASE1_PLAN.md for why.)
+
+Two-tier fetch (hardening added post-Phase-6, runtime audit): verified directly (not
+assumed) that ok.ru exposes no genuine audio-only format -- every listed format has
+empty vcodec/acodec fields, re-probed twice. So prepare_asset() defaults to tier="low"
+(format="bestaudio/worst": picks true audio-only where a host provides one, degrades
+to the cheapest available muxed stream where it doesn't -- generic, not ok.ru-specific)
+for subtitles/ASR/a fallback frame, and only escalates to tier="high" (the original
+height<=720 selector) when OCR actually turns out to be needed. Audio and subtitles are
+fetched/extracted once, from whichever tier is fetched first, and reused across tiers --
+they don't depend on video quality.
 """
 
 import hashlib
@@ -30,6 +40,27 @@ _CUE_TIME_RE = re.compile(
 )
 _TAG_RE = re.compile(r"<[^>]+>")
 
+_FFPROBE_TIMEOUT_S = 30
+_FFMPEG_TIMEOUT_S = 600  # generous for a long video's audio extraction on a slow machine
+
+_TIER_FORMAT_SELECTORS = {
+    "low": "bestaudio/worst",
+    "high": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+}
+
+
+def _format_selector_for_tier(tier: str) -> str:
+    """
+    Pure function (no network) so the tier->selector mapping is directly unit-testable.
+    See module docstring for the rationale behind each tier's selector.
+    """
+    try:
+        return _TIER_FORMAT_SELECTORS[tier]
+    except KeyError:
+        raise ValueError(
+            f"Unknown tier {tier!r}; expected one of {sorted(_TIER_FORMAT_SELECTORS)}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # prepare_asset
@@ -37,39 +68,55 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 
 def prepare_asset(
-    video_url: str, *, work_dir: Optional[str] = None, use_cache: bool = True
+    video_url: str,
+    *,
+    tier: str = "low",
+    work_dir: Optional[str] = None,
+    use_cache: bool = True,
 ) -> VideoAsset:
     """
     Resolve a video URL (or a local video file path) to a local VideoAsset: download
     (if remote), probe metadata, extract audio.
 
     Downloads into a cache dir keyed by a hash of video_url (under work_dir, or
-    $QUEST1_WORK_DIR, or ./.cache). If a complete cached result exists and use_cache is
-    True, reuses it instead of re-downloading -- Phases 2/3/5/6 all re-consume the same
-    video, and re-downloading a 54-minute source on every run is impractical.
+    $QUEST1_WORK_DIR, or ./.cache). If a complete cached result exists for the
+    requested tier and use_cache is True, reuses it instead of re-downloading.
 
-    If video_url is an existing local file path, yt-dlp is skipped entirely and the
-    file is probed directly -- this is what lets Phase 3's synthetic-clip test (and
-    Phase 6's offline end-to-end test) exercise the full pipeline with no network.
+    tier="low" (default) fetches the cheapest available format -- enough for the
+    subtitle fast-path, ASR, and a fallback output frame. tier="high" fetches the
+    height<=720-capped format, needed only when OCR ends up running. Call again with
+    tier="high" to escalate an asset already fetched at tier="low"; audio and
+    subtitles are fetched/extracted once (whichever tier is fetched first) and reused
+    across tiers -- see module docstring.
+
+    If video_url is an existing local file path, yt-dlp is skipped entirely, the file
+    is probed directly, and `tier` is ignored (there's nothing to escalate -- the file
+    IS the file). This is what lets Phase 3's synthetic-clip test (and Phase 6's
+    offline end-to-end test) exercise the full pipeline with no network.
     """
     cache_dir = _cache_dir_for(video_url, work_dir)
     meta_path = os.path.join(cache_dir, "meta.json")
 
+    is_local = os.path.isfile(video_url)
+    effective_tier = "high" if is_local else tier
+
     if use_cache and os.path.exists(meta_path):
-        cached = _load_cached_asset(meta_path)
+        cached = _load_cached_asset(meta_path, effective_tier)
         if cached is not None:
             return cached
 
     os.makedirs(cache_dir, exist_ok=True)
+    existing_meta = _read_meta(meta_path)
 
-    if os.path.isfile(video_url):
+    info = None
+    if is_local:
         video_path = os.path.abspath(video_url)
-        subtitle_paths: list[str] = []
+        subtitle_paths: list[str] = existing_meta.get("subtitle_paths", [])
     else:
-        outtmpl = os.path.join(cache_dir, "video.%(ext)s")
+        outtmpl = os.path.join(cache_dir, f"video_{effective_tier}.%(ext)s")
 
         ydl_opts = {
-            "format": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+            "format": _format_selector_for_tier(effective_tier),
             "outtmpl": outtmpl,
             "writesubtitles": True,
             "writeautomaticsub": True,
@@ -82,41 +129,58 @@ def prepare_asset(
             "noplaylist": True,
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = _extract_info_with_retry(ydl, video_url)
+        info, _subtitles_requested = _extract_info_with_subtitle_fallback(ydl_opts, video_url)
 
-        video_path = _find_downloaded_video(cache_dir)
+        video_path = _find_downloaded_video(cache_dir, effective_tier)
         if video_path is None:
             raise RuntimeError(
-                f"yt-dlp reported success for {video_url!r} but no video file was found "
-                f"in {cache_dir!r}"
+                f"yt-dlp reported success for {video_url!r} (tier={effective_tier!r}) "
+                f"but no video file was found in {cache_dir!r}"
             )
 
-        subtitle_paths = _find_subtitle_files(cache_dir)
-        _write_subtitle_kinds(cache_dir, subtitle_paths, info)
+        # Always check disk for subtitle files, regardless of subtitles_requested: a
+        # failed-with-fallback download (see _extract_info_with_subtitle_fallback) can
+        # still have written genuine subtitle files during its earlier failed attempt(s)
+        # -- e.g. yt-dlp successfully wrote 'en' captions to disk, then the overall call
+        # raised because a LATER requested language (an auto-translated variant) hit a
+        # 429. subtitles_requested=False only means "the attempt that finally succeeded
+        # didn't ask for subtitles" -- it says nothing about whether earlier attempts
+        # already left real files behind. Checking disk directly (cheap: one listdir on
+        # a hash-scoped cache dir) reflects what's actually there instead of trusting a
+        # flag that can undercount it. Verified live: this exact scenario dropped a
+        # real English caption track containing the target phrase, causing a false
+        # not_found.
+        subtitle_paths = existing_meta.get("subtitle_paths") or _find_subtitle_files(cache_dir)
+        if not existing_meta.get("subtitle_paths") and subtitle_paths:
+            _write_subtitle_kinds(cache_dir, subtitle_paths, info)
 
     probe = _ffprobe_streams(video_path)
     if not probe["has_audio"]:
         raise RuntimeError(
-            f"Video {video_path!r} has no audio stream. For a downloaded video this "
-            f"most likely means the format selector "
-            f"'bestvideo[height<=720]+bestaudio/best[height<=720]/best' dropped the "
-            f"audio track for this source (some HLS formats report audio_ext=none in "
-            f"their format list); for a local file it means the file itself has no "
-            f"audio track -- either way, Phase 2 (ASR) has no audio to transcribe."
+            f"Video {video_path!r} (tier={effective_tier!r}) has no audio stream. For "
+            f"a downloaded video this most likely means the format selector "
+            f"{_format_selector_for_tier(effective_tier)!r} dropped the audio track "
+            f"for this source (some HLS formats report audio_ext=none in their format "
+            f"list); for a local file it means the file itself has no audio track -- "
+            f"either way, the ASR track has no audio to transcribe."
         )
 
-    audio_path = os.path.join(cache_dir, "audio.wav")
-    _extract_audio(video_path, audio_path)
+    audio_path = existing_meta.get("audio_path")
+    if not audio_path or not os.path.exists(audio_path):
+        audio_path = os.path.join(cache_dir, "audio.wav")
+        _extract_audio(video_path, audio_path)
 
     metadata = VideoMetadata(
         fps=probe["fps"],
         duration_s=probe["duration_s"],
         width=probe["width"],
         height=probe["height"],
+        has_video=probe["has_video"],
     )
 
-    _save_meta(meta_path, video_path, audio_path, subtitle_paths, metadata)
+    _save_tier_meta(
+        meta_path, existing_meta, effective_tier, video_path, audio_path, subtitle_paths, metadata
+    )
 
     return VideoAsset(
         video_path=video_path,
@@ -132,38 +196,78 @@ def _cache_dir_for(video_url: str, work_dir: Optional[str]) -> str:
     return os.path.join(base, key)
 
 
-def _load_cached_asset(meta_path: str) -> Optional[VideoAsset]:
-    with open(meta_path, encoding="utf-8") as f:
-        data = json.load(f)
-    if not (os.path.exists(data["video_path"]) and os.path.exists(data["audio_path"])):
+def _read_meta(meta_path: str) -> dict:
+    """Load meta.json, transparently upgrading a pre-tiering cache entry if found."""
+    if not os.path.exists(meta_path):
+        return {}
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return _migrate_legacy_meta(data)
+
+
+def _migrate_legacy_meta(data: dict) -> dict:
+    """
+    Pre-tiering cache entries stored a single flat {video_path, audio_path, metadata,
+    subtitle_paths}. Transparently upgrade to the tiered shape ({tiers: {...},
+    audio_path, subtitle_paths}) rather than silently discarding and re-fetching an
+    already-downloaded video -- the original single fetch used the height<=720
+    selector, i.e. today's "high" tier.
+    """
+    if "tiers" in data or "video_path" not in data:
+        return data
+    return {
+        "tiers": {"high": {"video_path": data["video_path"], "metadata": data["metadata"]}},
+        "audio_path": data.get("audio_path"),
+        "subtitle_paths": data.get("subtitle_paths", []),
+    }
+
+
+def _load_cached_asset(meta_path: str, tier: str) -> Optional[VideoAsset]:
+    data = _read_meta(meta_path)
+    tier_data = data.get("tiers", {}).get(tier)
+    if tier_data is None:
         return None
-    metadata = VideoMetadata(**data["metadata"])
+    video_path = tier_data["video_path"]
+    audio_path = data.get("audio_path")
+    if not audio_path or not (os.path.exists(video_path) and os.path.exists(audio_path)):
+        return None
+    metadata = VideoMetadata(**tier_data["metadata"])
     return VideoAsset(
-        video_path=data["video_path"],
-        audio_path=data["audio_path"],
+        video_path=video_path,
+        audio_path=audio_path,
         metadata=metadata,
         subtitle_paths=data.get("subtitle_paths", []),
     )
 
 
-def _save_meta(
+def _save_tier_meta(
     meta_path: str,
+    existing_meta: dict,
+    tier: str,
     video_path: str,
     audio_path: str,
     subtitle_paths: list[str],
     metadata: VideoMetadata,
 ) -> None:
-    data = {
+    """Merge this tier's result into meta.json, preserving any other tier already recorded."""
+    data = dict(existing_meta)
+    tiers = dict(data.get("tiers", {}))
+    tiers[tier] = {
         "video_path": video_path,
-        "audio_path": audio_path,
-        "subtitle_paths": subtitle_paths,
         "metadata": {
             "fps": metadata.fps,
             "duration_s": metadata.duration_s,
             "width": metadata.width,
             "height": metadata.height,
+            "has_video": metadata.has_video,
         },
     }
+    data["tiers"] = tiers
+    data["audio_path"] = audio_path
+    data["subtitle_paths"] = subtitle_paths
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
@@ -196,11 +300,50 @@ def _extract_info_with_retry(ydl: "yt_dlp.YoutubeDL", video_url: str, attempts: 
     ) from last_exc
 
 
-def _find_downloaded_video(cache_dir: str) -> Optional[str]:
+def _looks_like_subtitle_failure(exc: Exception) -> bool:
+    """
+    Best-effort classification of a download failure as subtitle-specific rather than
+    a genuine video/audio problem. String-matches yt-dlp's known error phrasing
+    ("Unable to download video subtitles...") since yt-dlp doesn't expose a typed
+    distinction here -- narrow, but targets a real observed failure directly: YouTube
+    rate-limiting (HTTP 429) the subtitle endpoint specifically while the video/audio
+    format itself was never the problem. Subtitles are best-effort by design (the
+    subtitle fast-path already treats "no track" as a normal outcome) and must never
+    be allowed to abort the whole download.
+    """
+    return "subtitle" in str(exc).lower()
+
+
+def _extract_info_with_subtitle_fallback(ydl_opts: dict, video_url: str):
+    """
+    Try the download with subtitles requested first. If that specifically fails on a
+    subtitle-related error (see _looks_like_subtitle_failure), retry the SAME download
+    fresh with subtitles disabled entirely, rather than retrying the identical
+    already-failing subtitle request again (_extract_info_with_retry's own 3 attempts
+    already exhausted that, and hit the same rate limit each time in practice).
+
+    Returns (info, subtitles_requested) -- subtitles_requested is False when the
+    fallback fired, so the caller knows not to look for subtitle files that were never
+    asked for.
+    """
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            return _extract_info_with_retry(ydl, video_url), True
+        except RuntimeError as exc:
+            if not _looks_like_subtitle_failure(exc):
+                raise
+
+    no_subs_opts = dict(ydl_opts, writesubtitles=False, writeautomaticsub=False)
+    with yt_dlp.YoutubeDL(no_subs_opts) as ydl:
+        return _extract_info_with_retry(ydl, video_url), False
+
+
+def _find_downloaded_video(cache_dir: str, tier: str) -> Optional[str]:
+    prefix = f"video_{tier}."
     non_video_ext = {".vtt", ".srt", ".json", ".wav", ".part", ".ytdl"}
     candidates = []
     for name in os.listdir(cache_dir):
-        if not name.startswith("video."):
+        if not name.startswith(prefix):
             continue
         ext = os.path.splitext(name)[1].lower()
         if ext in non_video_ext:
@@ -240,20 +383,27 @@ def _ffprobe_streams(video_path: str) -> dict:
     fps -- HLS-muxed output can differ from what the m3u8 advertised, and Phase 5's
     frame-accuracy math depends on this number being right.
     """
-    result = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-            video_path,
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                video_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_FFPROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"ffprobe timed out after {exc.timeout}s on {video_path!r} -- a hung "
+            f"subprocess would otherwise block indefinitely with no way to notice."
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed on {video_path!r}: {result.stderr.strip()}")
 
@@ -261,8 +411,23 @@ def _ffprobe_streams(video_path: str) -> dict:
     streams = data.get("streams", [])
     video_streams = [s for s in streams if s.get("codec_type") == "video"]
     audio_streams = [s for s in streams if s.get("codec_type") == "audio"]
+    format_duration_s = float(data.get("format", {}).get("duration") or 0.0)
+
     if not video_streams:
-        raise RuntimeError(f"No video stream found in {video_path!r}")
+        # A legitimate outcome, not an error: tier="low"'s "bestaudio/worst" selector
+        # picks a genuine audio-only format on hosts that expose one (verified: YouTube
+        # does; ok.ru does not). Callers needing an actual frame to extract must
+        # escalate to a video-containing tier first -- see main.py's run_pipeline,
+        # which checks has_video before calling refine.to_frame_match().
+        return {
+            "fps": 0.0,
+            "duration_s": format_duration_s,
+            "width": 0,
+            "height": 0,
+            "has_audio": bool(audio_streams),
+            "has_video": False,
+        }
+
     vs = video_streams[0]
 
     # Prefer avg_frame_rate (measured over the whole stream); fall back to r_frame_rate
@@ -271,9 +436,7 @@ def _ffprobe_streams(video_path: str) -> dict:
     if fps <= 0:
         fps = _parse_frame_rate(vs.get("r_frame_rate", "0/0"))
 
-    duration_s = float(
-        data.get("format", {}).get("duration") or vs.get("duration") or 0.0
-    )
+    duration_s = format_duration_s or float(vs.get("duration") or 0.0)
 
     return {
         "fps": fps,
@@ -281,6 +444,7 @@ def _ffprobe_streams(video_path: str) -> dict:
         "width": int(vs.get("width", 0)),
         "height": int(vs.get("height", 0)),
         "has_audio": bool(audio_streams),
+        "has_video": True,
     }
 
 
@@ -294,24 +458,31 @@ def _extract_audio(video_path: str, audio_path: str) -> None:
     -- ffmpeg's own resampler is the simplest reliable tool for it, and 16kHz mono is
     exactly faster-whisper's expected input, so Phase 2 does no resampling of its own.
     """
-    result = subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-i",
-            video_path,
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-c:a",
-            "pcm_s16le",
-            audio_path,
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                video_path,
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                audio_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_FFMPEG_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"ffmpeg audio extraction timed out after {exc.timeout}s for {video_path!r} "
+            f"-- a hung subprocess would otherwise block indefinitely with no way to notice."
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(
             f"ffmpeg audio extraction failed for {video_path!r}: "
