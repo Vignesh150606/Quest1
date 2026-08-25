@@ -830,3 +830,245 @@ ships no subtitle track at all, so the entire subtitle fast-path -- including bo
 bugs found here -- had zero real-world exercise before this session.
 
 ---
+
+Session prompt: two more real generalization tests, both explicitly authorized:
+"https://youtu.be/X1aFkAkFASk 'Hell answers to me'" (Avengers: Doomsday trailer) and,
+separately, two of the user's own Google Drive videos ("this is my video of speaking
+search for 'Potential fit for volopay'only asr will work can the code handle that?"
+and a follow-up phrase "And approval through a payment,reconciliation and accounting"
+against two different Drive links). Each probed read-only first, then run for real.
+
+Avengers trailer: clean match first try, no bugs -- "Hell answers to me." at
+00:01:31.174, frame 2186, similarity 1.0, subtitle modality. Confirms the two
+subtitle-path fixes above generalize beyond the one video that found them.
+
+Google Drive support: confirmed yt-dlp's GoogleDrive extractor works for a personal
+video link out of the box, no code changes needed. First Drive video ("volopay.mp4",
+61.6s, no subtitle track): ASR correctly caught "Potential fit for volopay" at
+00:00:24.633 (similarity 0.90) -- Whisper actually transcribed "Wallopay" not
+"Volopay" (a plausible mishearing of an unfamiliar brand name), and fuzzy matching
+correctly tolerated it. This is the fuzzy-matching design working as intended, not a
+bug. Second query against the SAME video, "...reconciliation and accounting", genuinely
+returned not_found -- verified by transcribing the full audio directly and confirming
+"reconciliation" never appears anywhere in the actual speech; user independently
+confirmed this after being shown the transcript ("Actually the not found is true there
+was no word reconciliation").
+
+Second Drive video ("task4_video", 160s) with the same "...reconciliation..." phrase:
+returned status="match" (score 0.94) but investigation (prompted by the reported
+timestamp looking suspicious relative to the video's own word-level caption timing)
+found the reported onset was measurably wrong -- reported frame 4262 (00:02:22.067),
+but the word "approval" is actually first spoken/tagged at 00:02:20.319 (frame ~4210),
+1.75s / ~52 frames earlier. Root cause: this Drive video's auto-caption track renders
+as a continuously SCROLLING 2-line window (confirmed directly by reading the raw .vtt:
+cue N+1 is cue N with the oldest line dropped and new words appended, repeated
+end-to-end for the whole 160s track) -- cue block start/end times are not reliable
+onset anchors for this format at all.
+
+This was flagged to the user with evidence before any fix, per CLAUDE.md's explicit
+"stop and explain" instruction for a correctness-bar gap -- two increasingly ambitious
+attempts were then tried and both rejected by direct measurement before landing on the
+one that works, all before the user weighed in:
+  1. Cluster cues with near-zero time gaps (mirroring ocr_track.py's _cluster_hits),
+     report the cluster's earliest cue as onset. Rejected: measured directly against
+     the real file and found ALL 126 cues in the whole track collapsed into ONE
+     cluster (this renderer paces every redraw at near-zero gaps continuously, not
+     just within one sentence) -- reported the video's very first cue (~4s) as onset
+     for a phrase spoken at ~140s. An active regression, caught before being left in
+     place, not shipped.
+  2. Presented the finding + both a "revert to original, document the limitation" and
+     a "parse real per-word timestamps" option to the user. User: "implement 2."
+  3. Implemented word-level onset refinement: WebVTT's karaoke-style
+     `<HH:MM:SS.mmm><c> word</c>` tags (already embedded in these files, previously
+     stripped entirely by the plain-text cue parser) give each word's TRUE first-seen
+     timestamp, since a word is tagged exactly once, when genuinely new -- later redraw
+     cues redisplay it as plain untagged text. Built one deduplicated (timestamp, word)
+     timeline per file from these tags and reused asr_track.py's own proven word-window
+     + window_similarity matching approach against it (same algorithm ASR already uses
+     for Whisper output, just applied to caption timing instead of audio) -- rather
+     than inventing a new one. One real gap found and fixed along the way: tags alone
+     dropped 2 boundary words ("and" before "approval", "accounting" after) that are
+     each a cue's UNTAGGED leading word, which left the correct window's score just
+     under threshold (0.8491 vs 0.85). A full transcript-diff reconstruction was
+     prototyped to recover these and REJECTED after direct testing showed it
+     duplicating large spans on repeated short words (real, hard-to-fully-trust
+     complexity) -- replaced with a narrower, directly-verified heuristic: only the
+     SINGLE word immediately before a cue's first tag is ever genuinely new (confirmed
+     against the real file), recovered at that cue's own start and deduplicated against
+     the immediately-preceding appended word. For tracks with no such tags at all
+     (every other real track tested this session), falls back to the original,
+     untouched, independent per-cue scoring -- unchanged behavior, zero regression risk
+     for the common case.
+
+Verified directly, not assumed: (a) with a phrase that fully matches real spoken
+content ("approval through a payments and accounting"), the fix reports the TRUE
+onset (140.319s, similarity 1.0, evidence.match_method="word_window") instead of the
+cue block's late 142.070s: (b) with the original "...reconciliation..." phrase
+(content genuinely absent from the video, already established above), the stricter
+word-level ratio scorer correctly declines (0.8491 < 0.85) and falls back to the
+pre-existing cue-level answer (142.067s) -- never worse than before this
+investigation, sometimes meaningfully better. Both the Avengers and Shape of You
+videos (plain, non-karaoke tracks) re-verified unaffected after this change.
+
+3 new offline tests replace the 2 written for the rejected clustering attempt:
+word-level onset on a real (reproduced verbatim) rolling-caption fixture, correct
+fallback when the word-level score is weak, and a regression guard that plain tracks
+are untouched. `python verify.py all`: green (8/8 phases) after the final version.
+Also fixed in passing: `_parse_subtitle_cues` and the new `_parse_tagged_words` now
+share one `_iter_raw_cue_blocks` block-splitting helper instead of duplicating it.
+
+---
+
+Session prompt: user ran several more real generalization tests (given as
+"<link> <quote> give cmd for vs code", explicitly asked not to be logged since they
+were just command lookups -- honored for those). One surfaced a real bug worth logging
+on its own: https://youtu.be/f5M1d7r2UNQ, target "Do I look civilized to you?" returned
+status="match" with extracted_text="I" (a single character!) at 00:00:23.583,
+match_score=1.0. User: "it is wrong actual dialogue appears at 2:43 something."
+
+Root-caused directly, not guessed: this video's subtitle track has a standalone cue
+whose entire text is just "I" (a one-character interjection). rapidfuzz's
+partial_ratio (src/text_match.py's similarity(), used by the subtitle cue-matching
+path) finds the best alignment of the SHORTER of its two strings within the longer one
+-- "i" trivially appears in "do i look civilized to you", so a single-character cue
+scored a "perfect" 1.0 match. This is the EXACT SAME root cause as an earlier
+OCR-track bug (ocr_track.py's _MIN_CANDIDATE_LENGTH_RATIO, found during the Japanese/
+fansub generalization test days earlier), now confirmed independently in a completely
+different call site (subtitle cues, not OCR lines) -- the second time this exact class
+of bug has been found by testing against a real, non-example video.
+
+Considered centralizing the fix into text_match.similarity() itself (both bugs share
+that one function), but rejected after checking: similarity()'s own existing test
+(test_window_similarity_penalizes_partial_overlap) deliberately relies on a SHORT
+candidate ("my mind") validly matching a LONGER target ("my mind rebels at
+stagnation") with score 1.0 -- a length-ratio guard inside similarity() itself would
+have broken that already-correct, already-tested behavior. The actual failure mode is
+about how short a CUE is allowed to be relative to the TARGET it's being checked
+against, which is specific to how ingest.py's subtitle path uses similarity(), not a
+defect in the function itself -- so the fix (_MIN_CUE_LENGTH_RATIO = 0.5, mirroring
+ocr_track.py's constant and reasoning but implemented locally, not shared) is scoped
+to try_subtitle_fast_path's cue-matching loop only: cues shorter than 50% of the
+target's own normalized length are skipped before scoring.
+
+Verified directly: with the fix, this exact video/target no longer returns the "I"
+false positive (confirmed against the real cached subtitle file first, before running
+the full pipeline). Also investigated what the CORRECT answer should be, since the
+pipeline now returns not_found for this exact phrase: found a real, topically-related
+caption "I WAS HOPING TO HAVE A CIVILIZED CONVERSATION" at ~155.7-162.0s (~2:36-2:42,
+matching the user's own "2:43 something" memory) -- but checked its actual fuzzy score
+against the user's typed target directly: similarity=0.58, window_similarity=0.48, both
+well below the 0.85 threshold. Same class of finding as an earlier session's
+"reconciliation" case: the user's typed phrase and the video's actual wording are
+genuinely different sentences (sharing only "civilized" and filler words), so
+not_found is the correct, honest answer here, not a remaining bug -- reported this
+distinction back to the user rather than assuming either "it's fixed, done" or
+"it's still broken."
+
+4 new offline tests: reproduces the exact real "I"-cue structure and asserts it never
+wins; a short-target/short-cue case (mirrors ocr_track.py's own equivalent test) to
+prove the ratio guard doesn't overreach on genuinely valid short matches; the existing
+plain-track and rolling-caption tests all re-verified passing unchanged.
+`python verify.py all`: green (8/8 phases).
+
+Also fixed in this session, unprompted by a specific bug report but discovered while
+investigating a separate ok.ru cold-start run: yt-dlp's own logger was printing raw
+"WARNING:"/"ERROR:" lines directly to the terminal even with quiet=True set (quiet
+suppresses INFO but not yt-dlp's own warning/error output) -- including, alarmingly,
+the text of a transient connection-reset error that the code was already correctly
+retrying past. Real UX concern raised by the user directly: "what if recruiter sees
+[the error] and the code is not working and leaves?" Added a _QuietYdlLogger (no-op
+debug/warning/error methods) plus a calm "Network hiccup during download setup,
+retrying (N/3)..." message printed only on an actual retry -- a genuine final failure
+(all retries exhausted) still surfaces clearly as "Error: ..." via main.py's existing
+handler; nothing is hidden, just the noisy-but-harmless intermediate output. Verified
+live: re-ran the same ok.ru command that previously showed the raw SSL/connection-reset
+errors -- clean, linear [1/5]..[5/5] progress output with no stray WARNING/ERROR lines,
+same correct final result.
+
+---
+
+Session prompt: user pushed back on the "Do I look civilized to you?" not_found
+conclusion above with a screenshot proving the line IS an on-screen caption in the
+video, then clarified: "No like he also says the dialogue and it is also in
+subtitles." This directly contradicted my own prior investigation, which had checked
+the actual .vtt file and concluded (wrongly) that the closest content was a
+differently-worded, low-scoring line -- so I re-investigated from scratch rather than
+defending the earlier conclusion.
+
+grep across all 4 subtitle file variants for "civiliz" immediately found the exact
+line, verbatim, as a karaoke-tagged cue at 00:02:42.000: "Do<...><c> I</c><c> look</c>
+<c> civilized</c><c> to</c><c> you?</c>". My earlier manual trace had genuinely missed
+it (the printed cue dump jumped straight past this region) -- direct re-testing of
+_parse_subtitle_cues and _parse_tagged_words against this exact file confirmed why:
+BOTH returned nothing at all for the 160-170s window. Traced the raw file byte-for-byte
+and found the real bug: this specific auto-caption file uses a line containing a
+single stray space character as intentional filler WITHIN some cues' own multi-line
+content (a real "TIMING\n \nACTUAL TEXT" structure, confirmed directly in the raw
+bytes) -- NOT a cue separator. The block-splitting regex (`\n\s*\n`, shared by both
+parsers via _iter_raw_cue_blocks) lets \s match that stray space, so it silently split
+this one cue into a timing-only fragment (discarded: no text after tag-stripping) and
+a text-only fragment (discarded: no timing line, treated as header/NOTE content) --
+the entire dialogue line vanished from every parse with zero error output, just
+silent absence. This is exactly why it was never scored at all, let alone scored low.
+
+Verified the fix hypothesis BEFORE applying it: compared re.split(r'\n\s*\n', ...) vs
+re.split(r'\n\n+', ...) against the real file directly, confirmed the narrower pattern
+keeps this cue's timing+text together as one block, and confirmed (by inspecting the
+file's genuine inter-cue blank lines directly) that real separators in this file are
+bare blank lines, not stray-space lines -- so narrowing the pattern doesn't merge any
+cues that should stay separate. Applied the fix to _iter_raw_cue_blocks (shared by
+both the cue-level and word-level subtitle parsers, so both are fixed at once). 2 new
+offline tests reproduce the exact real structure (stray-space-filler cue, for both the
+cue-level and word-level parsers) and assert genuine separators still work correctly.
+`python verify.py all`: green (8/8 phases). Verified live end-to-end: exact match,
+similarity 1.0, timestamp 00:02:42.000, frame 3888 -- matches the user's own
+screenshot exactly.
+
+Explicitly corrected the record with the user rather than letting the earlier wrong
+conclusion stand: my prior "not_found is correct, it's a wording mismatch" answer was
+wrong because the investigation behind it never actually found the real cue to compare
+against -- the parsing bug hid it before matching logic ever ran. This is the third
+real, generalizable bug found this session purely by testing against real videos
+(after the subtitle-discarding-on-429 bug and the degenerate-short-cue false-positive
+bug) -- and the second time a user-provided screenshot/direct pushback, not a
+self-initiated check, was what surfaced it.
+
+---
+
+Session prompt: another real generalization test (given as a plain "<link>,<quote> cmd
+for this dont append prompt" -- honored for the lookup itself) surfaced a 4th real bug
+this session: https://www.youtube.com/watch?v=-3UL9Ed5CSk, target "they make me feel
+sad" returned not_found. User pushed back again with a screenshot showing the on-screen
+caption "they make [singing] me feel sad. Why should", confirming the line IS present
+-- "Actually it is a song so the problem is in the subtitle you can see the problem
+can we do something about that?"
+
+Investigated directly: this video's auto-captions insert "[singing]" as its own
+karaoke-tagged word, sitting literally between "make" and "me" in the caption stream --
+confirmed by grepping the raw .vtt and by calling _best_word_window_match with
+threshold=0 to see the actual best-possible score: 0.84 (window_similarity, ratio-
+based), just under the 0.85 threshold -- the bracketed annotation was being scored as
+if it were a real content word, diluting the match by just enough to fail. This is a
+generalizable pattern, not specific to this one video: auto-caption generators
+commonly insert bracketed sound-event tags ("[singing]", "[music]", likely "[applause]"
+etc. by the same convention) into caption streams for music/performance videos.
+
+Fixed at the root: added bracket-span stripping to text_match.normalize() itself
+(_BRACKETED_RE = r"\[[^\]]*\]", applied before punctuation stripping so the whole
+"[word]" span is removed, not just the brackets leaving the word behind) -- this is
+the single shared normalization function every matcher (subtitle cue, subtitle
+word-window, OCR line, ASR word-window) already funnels through, so fixing it there
+benefits all of them uniformly rather than patching just the subtitle path. 2 new
+tests: a direct normalize() unit test, plus the existing real-video verification.
+`python verify.py all`: green (8/8 phases). Verified live: re-ran the real video,
+similarity now 1.0 (was 0.84), correct match at 00:02:15.833, frame 3260.
+
+This is the 4th real, generalizable bug found this session purely by testing against
+real videos (subtitle-discarding-on-429, degenerate-short-cue false-positive, the
+stray-space block-splitting bug, now this) -- and the third found via direct user
+pushback with real evidence (a screenshot) rather than a self-initiated check, worth
+noting as a pattern: real dialogue/lyrics against real caption tracks keeps finding
+categories of bugs that neither the graded example (no subtitle track at all) nor
+synthetic test fixtures (clean, well-formed VTT) could ever have exposed.
+
+---

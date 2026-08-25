@@ -25,6 +25,7 @@ from src.ingest import (
     _looks_like_subtitle_failure,
     _migrate_legacy_meta,
     _parse_subtitle_cues,
+    _parse_tagged_words,
     prepare_asset,
     try_subtitle_fast_path,
 )
@@ -59,6 +60,15 @@ def test_normalize():
     assert normalize("  Multiple   Spaces  ") == "multiple spaces"
     assert normalize("‘Curly’ “Quotes”") == "curly quotes"
     assert normalize("well—actually") == "well actually"
+
+
+def test_normalize_strips_bracketed_sound_annotations():
+    # Real bug, found by running against a real (non-example) music video: auto
+    # captions insert bracketed sound-event annotations ("[singing]", "[music]") as
+    # literal words in the caption stream. A whole bracketed span must be dropped
+    # (not just its brackets, which would leave "singing" behind as a real word).
+    assert normalize("they make [singing] me feel sad") == "they make me feel sad"
+    assert normalize("[music] don't want no happy pills") == "don t want no happy pills"
 
 
 def test_similarity_scale_is_0_to_1():
@@ -108,6 +118,65 @@ def test_parse_srt_cues():
     assert cues[2].text == DISTINCTIVE_PHRASE
 
 
+def test_parse_cues_keeps_cue_with_stray_space_filler_line(tmp_path):
+    # Real bug, found by running against a real (non-example) video: user reported a
+    # dialogue line ("Do I look civilized to you?") as genuinely present -- confirmed
+    # directly with grep that it WAS in the raw .vtt file, yet the pipeline reported
+    # not_found. Root cause: this auto-caption file uses a line containing a single
+    # stray space character as filler WITHIN some cues' own multi-line content
+    # (verified against the real file: "TIMING\n \nACTUAL TEXT", where the " " line is
+    # not a separator). The old `\n\s*\n` block-split pattern let \s match that space,
+    # silently splitting the cue into a timing-only fragment (discarded: no text) and a
+    # text-only fragment (discarded: no timing line) -- the entire line vanished from
+    # every parse with no error. Reproduces the exact real structure.
+    vtt_path = str(tmp_path / "stray_space.vtt")
+    with open(vtt_path, "w", encoding="utf-8") as f:
+        f.write(
+            "WEBVTT\n\n"
+            "00:02:40.000 --> 00:02:41.000\n"
+            "previous line\n\n"
+            "00:02:42.000 --> 00:03:04.710\n"
+            " \n"
+            "Do I look civilized to you?\n\n"
+            "00:03:05.000 --> 00:03:06.000\n"
+            "next line\n"
+        )
+
+    cues = _parse_subtitle_cues(vtt_path)
+    texts = [c.text for c in cues]
+    assert "Do I look civilized to you?" in texts
+    civilized_cue = next(c for c in cues if c.text == "Do I look civilized to you?")
+    assert civilized_cue.start == 162.0
+
+    # And genuinely bare blank lines between DIFFERENT cues must still separate them
+    # correctly (not accidentally merged into one giant cue) -- the fix narrows what
+    # counts as a separator, it must not stop separating genuine ones.
+    assert "previous line" in texts
+    assert "next line" in texts
+    assert len(cues) == 3
+
+
+def test_parse_tagged_words_recovers_word_after_stray_space_filler_line(tmp_path):
+    # Companion to the cue-level test above: the same real bug also silently dropped
+    # this cue's karaoke <c> word tags entirely (not just its plain text), which is
+    # what try_subtitle_fast_path's word-level onset refinement depends on.
+    vtt_path = str(tmp_path / "stray_space.vtt")
+    with open(vtt_path, "w", encoding="utf-8") as f:
+        f.write(
+            "WEBVTT\n\n"
+            "00:02:42.000 --> 00:03:04.710\n"
+            " \n"
+            "Do<00:02:42.240><c> I</c><00:02:42.400><c> look</c><00:02:42.720><c> civilized</c>"
+            "<00:02:43.320><c> to</c><00:02:43.480><c> you?</c>\n"
+        )
+
+    words = _parse_tagged_words(vtt_path)
+    word_texts = [w.strip() for _, w in words]
+    assert "civilized" in word_texts
+    civilized_ts = next(t for t, w in words if w.strip() == "civilized")
+    assert civilized_ts == 162.72
+
+
 # ---------------------------------------------------------------------------
 # try_subtitle_fast_path
 # ---------------------------------------------------------------------------
@@ -151,6 +220,125 @@ def test_subtitle_fast_path_srt_also_matches():
     cand = try_subtitle_fast_path(asset, DISTINCTIVE_PHRASE)
     assert cand is not None
     assert cand.timestamp == 7.0
+
+
+# Real karaoke-tagged VTT fragment, reproduced verbatim from a real (non-example)
+# video's actual auto-caption file: a continuously scrolling 2-line window, where cue
+# block boundaries do NOT correspond to true word onsets. "approval" is truly first
+# spoken/tagged at 140.319s; the cue block containing the best cue-level text match
+# starts at 142.070s -- 1.75s later. See the module comment above try_subtitle_fast_path
+# for the two rejected cue-level fixes and why only per-word <c> tags solve this.
+_ROLLING_CAPTION_VTT = (
+    "WEBVTT\n\n"
+    "00:02:15.000 --> 00:02:20.000 align:start position:0%\n"
+    "narrating<00:02:15.500><c> how</c><00:02:16.000><c> spend</c><00:02:16.500><c> currently</c>"
+    "<00:02:17.000><c> moves</c><00:02:17.500><c> from</c><00:02:18.000><c> the</c>"
+    "<00:02:18.500><c> request</c>\n\n"
+    "00:02:20.000 --> 00:02:22.070 align:start position:0%\n"
+    "spend currently moves from the request\n"
+    "and<00:02:20.319><c> approval</c><00:02:20.720><c> through</c><00:02:20.959><c> a</c>"
+    "<00:02:21.120><c> payments</c><00:02:21.760><c> and</c>\n\n"
+    "00:02:22.070 --> 00:02:22.080 align:start position:0%\n"
+    "and approval through a payments and\n\n"
+    "00:02:22.080 --> 00:02:24.710 align:start position:0%\n"
+    "and approval through a payments and\n"
+    "accounting<00:02:22.720><c> and</c><00:02:23.200><c> identify</c><00:02:23.599><c> the</c>"
+    "<00:02:23.840><c> actual</c><00:02:24.239><c> gap</c>\n"
+)
+
+
+def test_subtitle_fast_path_word_level_onset_for_rolling_caption(tmp_path):
+    # The fix: when the target phrase's words are all captured by real <c> tags (plus
+    # the one boundary word recovered per cue, see _parse_tagged_words), onset comes
+    # from the true word timestamp (140.319s), not the winning cue block's own later
+    # start (142.070s) or the video's very first cue (the rejected clustering attempt's
+    # failure mode).
+    vtt_path = str(tmp_path / "rolling.vtt")
+    with open(vtt_path, "w", encoding="utf-8") as f:
+        f.write(_ROLLING_CAPTION_VTT)
+
+    asset = _asset_with_subs(vtt_path)
+    cand = try_subtitle_fast_path(asset, "approval through a payments and accounting")
+
+    assert cand is not None
+    assert cand.evidence["match_method"] == "word_window"
+    assert cand.timestamp == 140.319
+    assert cand.similarity == 1.0
+
+
+def test_subtitle_fast_path_falls_back_to_cue_level_when_word_match_is_weak(tmp_path):
+    # Real behavior, found by running against a real video: a target phrase containing
+    # content genuinely absent from the video (here "reconciliation", which was never
+    # actually said) scores just under threshold at the word level (0.8491 -- ratio
+    # correctly penalizes the missing word, unlike partial_ratio) even though the
+    # phrase is "close". The fast path must fall back to the pre-existing cue-level
+    # match rather than reporting no match at all -- never worse than the original
+    # (pre-investigation) behavior, even when the more precise method can't confirm.
+    vtt_path = str(tmp_path / "rolling.vtt")
+    with open(vtt_path, "w", encoding="utf-8") as f:
+        f.write(_ROLLING_CAPTION_VTT)
+
+    asset = _asset_with_subs(vtt_path)
+    cand = try_subtitle_fast_path(asset, "And approval through a payment,reconciliation and accounting")
+
+    assert cand is not None
+    assert cand.evidence["match_method"] == "cue"
+    assert cand.timestamp == 142.07  # the cue-level answer, same as before this fix
+
+
+def test_subtitle_fast_path_plain_track_still_uses_cue_matching():
+    # Regression guard: a track with no <c> tags at all (sample.en.vtt, and every real
+    # non-example video tested so far except the rolling-caption one) must be entirely
+    # unaffected by this change -- _parse_tagged_words returns [] and the original,
+    # untouched cue-level path handles it exactly as before.
+    asset = _asset_with_subs(VTT_FIXTURE)
+    cand = try_subtitle_fast_path(asset, DISTINCTIVE_PHRASE)
+    assert cand is not None
+    assert cand.evidence["match_method"] == "cue"
+    assert cand.timestamp == 7.0
+
+
+def test_subtitle_fast_path_rejects_degenerate_short_cue(tmp_path):
+    # Real bug, found by running against a real (non-example) video: rapidfuzz's
+    # partial_ratio scored a standalone one-character cue ("I") as a PERFECT 1.0 match
+    # against the unrelated target "Do I look civilized to you?", purely because "i"
+    # trivially appears in it -- the exact same root cause as an earlier OCR-track bug
+    # (ocr_track.py's _MIN_CANDIDATE_LENGTH_RATIO), now confirmed in the subtitle
+    # cue-matching path too. Reproduces the real cue structure: a short "I" cue sitting
+    # right next to the actual (unrelated) dialogue.
+    vtt_path = str(tmp_path / "degenerate.vtt")
+    with open(vtt_path, "w", encoding="utf-8") as f:
+        f.write(
+            "WEBVTT\n\n"
+            "00:00:22.88 --> 00:00:23.59\n"
+            "I promise.\n\n"
+            "00:00:23.59 --> 00:00:23.60\n"
+            "I\n\n"
+            "00:02:35.67 --> 00:02:41.99\n"
+            "I was hoping to have a civilized conversation.\n"
+        )
+
+    asset = _asset_with_subs(vtt_path)
+    cand = try_subtitle_fast_path(asset, "Do I look civilized to you?")
+
+    # The degenerate "I" cue must never win -- either no match at all, or (since a
+    # longer, topically-related cue exists) that longer cue, never the single character.
+    assert cand is None or cand.matched_text != "I"
+
+
+def test_subtitle_fast_path_still_matches_short_target_short_cue(tmp_path):
+    # Regression guard: the length-ratio gate is relative to the TARGET's own length, so
+    # a short target genuinely matching a comparably-short cue must still work --
+    # mirrors ocr_track.py's own equivalent guard-doesn't-overreach test
+    # (test_score_lines_still_matches_genuine_short_target).
+    vtt_path = str(tmp_path / "short.vtt")
+    with open(vtt_path, "w", encoding="utf-8") as f:
+        f.write("WEBVTT\n\n00:00:05.000 --> 00:00:06.000\nStop!\n")
+
+    asset = _asset_with_subs(vtt_path)
+    cand = try_subtitle_fast_path(asset, "Stop")
+    assert cand is not None
+    assert cand.matched_text == "Stop!"
 
 
 # ---------------------------------------------------------------------------

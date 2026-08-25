@@ -21,16 +21,31 @@ _UNICODE_QUOTES = {
     "“": '"', "”": '"', "„": '"', "‟": '"',
     "–": "-", "—": "-", "−": "-",
 }
+# Real bug, found by running against a real (non-example) music video: auto-generated
+# captions for songs commonly insert bracketed sound-event annotations -- "[singing]",
+# "[music]" -- as literal words in the caption stream (confirmed directly: YouTube's
+# auto-captions tagged "[singing]" as its own timed word, sitting mid-target-phrase:
+# "they make [singing] me feel sad"). These are caption metadata, not spoken/sung
+# content, and diluting a match with one just barely dropped a genuine target phrase
+# below threshold (0.84 vs 0.85). Stripped as a whole bracketed span (not just the
+# brackets themselves, which _PUNCT_RE alone would leave "singing" behind as a real
+# word) BEFORE punctuation stripping, so this fix benefits every normalize() caller
+# (subtitle cue/word matching, OCR line matching, ASR word-window matching) uniformly.
+_BRACKETED_RE = re.compile(r"\[[^\]]*\]")
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _WS_RE = re.compile(r"\s+")
 
 
 def normalize(text: str) -> str:
-    """Casefold, unify unicode quotes/dashes to ASCII, strip punctuation, collapse whitespace."""
+    """
+    Casefold, unify unicode quotes/dashes to ASCII, strip bracketed annotations (e.g.
+    "[music]"), strip punctuation, collapse whitespace.
+    """
     text = unicodedata.normalize("NFKC", text)
     for src, dst in _UNICODE_QUOTES.items():
         text = text.replace(src, dst)
     text = text.casefold()
+    text = _BRACKETED_RE.sub(" ", text)
     text = _PUNCT_RE.sub(" ", text)
     text = _WS_RE.sub(" ", text).strip()
     return text
