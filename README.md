@@ -4,7 +4,8 @@ Given a video URL and a target line of dialogue, this tool finds the exact frame
 that line first appears (spoken or on-screen), the timestamp, the extracted text, and
 saves that frame as an image. It works from a subtitle/CC track when the platform ships
 one, speech recognition (faster-whisper) when it doesn't, and on-screen text detection
-(PaddleOCR) as a further fallback — see `APPROACH.md` for the full design rationale.
+(PaddleOCR) as a further fallback — see `APPROACH.md` for the full design rationale and
+`ARCHITECTURE.pdf` for a diagram of the whole pipeline.
 
 ## What This Does
 
@@ -20,45 +21,32 @@ one, speech recognition (faster-whisper) when it doesn't, and on-screen text det
 6. Extracts the exact frame via frame-accurate decoding and writes `report.json` + a
    PNG of that frame.
 
-## Quick Start (Docker)
+## Setup
 
-```bash
-docker build -t quest1 .
-docker run --rm \
-  -v "$(pwd)/output:/app/output" \
-  -v "$(pwd)/.cache:/app/.cache" \
-  -v "$(pwd)/.hf-cache:/root/.cache/huggingface" \
-  -v "$(pwd)/.paddle-cache:/root/.paddleocr" \
-  quest1 --url <video_url> --dialogue-text "<target phrase>" --output /app/output
-```
+No Docker — everything here is a normal local Python (+ Node, for the optional web UI)
+install. Three prerequisites, installed once, then one command runs everything.
 
-The three cache mounts (`.cache/`, `.hf-cache/`, `.paddle-cache/`) are optional but
-strongly recommended: without them, every fresh `docker run` re-downloads the video and
-both ML models (faster-whisper, PaddleOCR) from scratch, since a container's filesystem
-is ephemeral by default. With them, only the first run pays that cost; later runs
-(including against the same video with different dialogue text) reuse everything.
+**1. Python 3.12** (`requirements.txt`'s pins were verified against 3.12.10 specifically
+— a different Python 3 minor version will very likely still work, but 3.12 is the one
+actually tested):
 
-**Known limitation — OCR crashes inside this containerized environment.** Verified by
-actually building and running the image (not assumed): the subtitle fast-path, ASR
-track, arbiter, refine, and report stages all run correctly in Docker (confirmed with a
-real end-to-end run, exit 0, correct match). The OCR track specifically crashes with
-`could not create a primitive descriptor for a reorder primitive` — a PaddlePaddle/oneDNN
-issue that only reproduces inside this virtualized environment (Docker Desktop's WSL2
-VM); the identical code runs correctly natively on the same physical machine. This
-appears to be an unresolved upstream PaddlePaddle/PaddleOCR bug (multiple GitHub issues
-report the same error with no confirmed fix as of this writing); two targeted
-environment-variable workarounds were tried and verified not to resolve it (see
-`Dockerfile`'s comments for what was tried). **If a video needs the OCR track
-specifically** (on-screen/burned-in text, no usable subtitle track, and ASR doesn't
-confidently match), use `--skip-ocr` to get a fast `not_found` in Docker rather than a
-crash, or run that case via the local Python fallback below, where OCR works normally.
+- **Windows**: `winget install Python.Python.3.12` — or download the installer from
+  [python.org/downloads](https://www.python.org/downloads/) and make sure "Add
+  python.exe to PATH" is checked during install.
+- **macOS**: `brew install python@3.12`
+- **Linux (Debian/Ubuntu)**: `sudo apt-get install python3.12 python3.12-venv` (if your
+  distro's default repos don't have 3.12 yet, the
+  [deadsnakes PPA](https://github.com/deadsnakes/) or [pyenv](https://github.com/pyenv/pyenv)
+  both work)
 
-## Quick Start (Local Fallback)
+Verify with `python --version` (or `python3 --version`) — it must print `3.12.x`.
+`run.py` below calls whichever `python` is on `PATH`, so if your system default is a
+different version, create the virtual environment explicitly with the 3.12 interpreter
+first (e.g. `py -3.12 -m venv .venv` on Windows, `python3.12 -m venv .venv` elsewhere)
+before running it.
 
-Docker is the primary path, but this runs identically without it.
-
-**1. System dependency: ffmpeg** (needed for audio extraction/probing; PyAV bundles its
-own decoder for frame extraction, but `ffmpeg`/`ffprobe` on `PATH` are still required):
+**2. ffmpeg** (needed for audio extraction/probing; PyAV bundles its own decoder for
+frame extraction, but `ffmpeg`/`ffprobe` on `PATH` are still required):
 
 - **Windows**: `winget install ffmpeg` or download a build from
   [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) and add it to `PATH`.
@@ -67,18 +55,40 @@ own decoder for frame extraction, but `ffmpeg`/`ffprobe` on `PATH` are still req
 
 Verify with `ffmpeg -version` and `ffprobe -version`.
 
-**2. Python environment** (Python 3.12 — the version `requirements.txt`'s pins were
-verified against):
+**3. Node.js** (only needed for the optional browser UI — skip this if you only want
+the CLI):
+
+- **Windows**: `winget install OpenJS.NodeJS.LTS`
+- **macOS**: `brew install node`
+- **Linux (Debian/Ubuntu)**: `sudo apt-get install nodejs npm`
+
+Verify with `node --version` (v20+ recommended).
+
+**4. Clone and run:**
+
+```bash
+git clone https://github.com/Vignesh150606/Quest1.git
+cd Quest1
+python run.py
+```
+
+`run.py` does the rest by itself: creates the `.venv` if it doesn't exist, installs the
+Python dependencies (`pip install -r requirements.txt`), installs the frontend
+dependencies (`npm install`), then starts both the backend and the browser UI —
+`http://localhost:3000` is ready once it says so. Re-running `python run.py` later is
+fast (pip/npm both skip already-satisfied installs). `Ctrl+C` stops both processes.
+
+The first real search is slower than later ones: beyond the one-time package installs
+above, the pipeline's own ML models (faster-whisper, PaddleOCR) download themselves
+automatically the first time they're actually used, and are cached locally afterward.
+
+**Just want the bare CLI, no browser UI?** Skip step 3 (Node.js) and `run.py` — this
+alone is the whole graded pipeline:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-```
-
-**3. Run it:**
-
-```bash
 python -m src.main --url <video_url> --dialogue-text "<target phrase>" --output ./output
 ```
 
@@ -148,8 +158,6 @@ by default; run them explicitly with:
 pytest -m network tests/ -v
 ```
 
-See `PHASE_CHECKLIST.md` for the phase-by-phase build order.
-
 ## Local Web App
 
 The CLI above is the graded core; this is an optional browser UI around the *same*
@@ -196,10 +204,13 @@ Browser --(poll GET /api/jobs/{id} every ~2.5s)--> FastAPI --> queued/processing
 
 ### Local development
 
-Two processes, run in separate terminals from the repo root:
+`python run.py` from the repo root (see "Setup" above) starts both pieces together —
+that's the normal way to run this. If you want them in two separate terminals instead
+(e.g. to see each one's own logs, or restart just one independently), that still works
+exactly the same way underneath:
 
 ```bash
-# Terminal 1 -- backend (same venv as the CLI; see Quick Start (Local Fallback) above)
+# Terminal 1 -- backend (same venv as the CLI; see Setup above)
 pip install -r requirements.txt   # now also installs fastapi/uvicorn
 uvicorn api.app:app --host 127.0.0.1 --port 8000 --reload
 ```
@@ -281,9 +292,9 @@ web/
   app/page.js     The whole frontend: form, polling, result rendering
 tests/            pytest suite, one file per src/ module above, plus api/ and fixtures/
 verify.py         Runs one phase's (or all phases') offline test suite
-Dockerfile        CLI image (primary submission artifact)
+run.py            One-command setup + launch for the backend + browser UI together
 APPROACH.md       Design rationale, trade-offs, and known limitations
-PHASES.md         Original phase specification
-PHASES_1_7_PLAN.md  Detailed per-phase implementation plan (historical)
+ARCHITECTURE.pdf  System architecture diagram
+CLAUDE.md         The original engineering brief/context this project was built against
 prompts.txt       Full AI prompt log, including real bugs found via generalization testing
 ```

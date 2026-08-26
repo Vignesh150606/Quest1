@@ -4,7 +4,7 @@ Phase 1 - Ingest + subtitle fast-path.
 Consumes: video URL (str), target phrase (str, CLI arg)
 Produces: VideoAsset; optional Candidate(modality="subtitle") on fast-path hit
 
-Verification (see PHASES.md): pytest tests/test_ingest.py
+Verification: pytest tests/test_ingest.py
 (Phase 1's real network-dependent check is `pytest -m network tests/test_ingest.py`;
 verify.py 1 runs the offline suite -- see PHASES_1_7_PLAN.md for why.)
 

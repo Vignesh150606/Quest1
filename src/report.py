@@ -11,7 +11,7 @@ responsible for refining every winning Candidate -- the single winner, or every
 AmbiguousResult alternative -- into a FrameMatch via src/refine.py BEFORE calling
 write_report(); this module only formats and serializes, it never seeks/decodes video.
 
-Verification (see PHASES.md): pytest tests/test_end_to_end.py::test_full_run
+Verification: pytest tests/test_end_to_end.py::test_full_run
 """
 
 import json

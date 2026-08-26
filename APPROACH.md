@@ -282,11 +282,6 @@ optimization.
   - `[singing]`/`[music]`-style bracketed annotations in auto-generated captions were
     being scored as literal words, diluting genuine matches below threshold. Fixed by
     stripping bracketed annotations in the shared normalization step.
-- **OCR crashes specifically inside Docker Desktop's WSL2 environment** (`could not
-  create a primitive descriptor for a reorder primitive`) — an apparently unresolved
-  upstream PaddlePaddle/oneDNN issue; the identical code runs correctly natively on the
-  same machine, and outside WSL2-based Docker generally. The CLI's local Python path is
-  unaffected.
 - **YouTube blocks requests from cloud/datacenter IP ranges** with a bot-detection
   wall — relevant only if the optional web layer is ever hosted on a cloud platform,
   not for local/CLI use, where it works normally from a residential IP.

@@ -8,7 +8,7 @@ Use PyAV exclusively for all frame-accurate extraction here -- never mix with ra
 ffmpeg -ss seeking inside pipeline code (keyframe-snapped ffmpeg seeks and
 decode-forward PyAV seeks can return different frames for the identical timestamp).
 
-Verification (see PHASES.md): pytest tests/test_refine.py::test_frame_accuracy
+Verification: pytest tests/test_refine.py::test_frame_accuracy
 """
 
 import os

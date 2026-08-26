@@ -1482,3 +1482,43 @@ Handling, Trade-offs & What Was Cut (reconciled against CLAUDE.md's own cutting/
 not-building lists), and Known Limitations -- including the Volopay/Wallopay ASR
 finding and the three real bugs found via testing this session, all with real evidence
 already gathered earlier rather than invented for the doc.
+
+Added pre-OCR gating to ocr_track.py's frame sampler, to cut redundant PaddleOCR calls:
+before invoking OCR on a sampled frame, two cheap numpy-only checks run first --
+(1) dedup: skip (and reuse the last real OCR result) if this frame's content is
+~identical to the last frame that was actually OCR'd, since it would just reproduce the
+same result; (2) text-presence: skip OCR (deliberately with a permissive threshold, no
+result to reuse) if the frame shows no edge-density evidence of containing any text at
+all. Neither adds a new dependency -- both are plain array operations on frames already
+decoded, no cv2 needed.
+
+Found and fixed a real bug in the first implementation attempt via this project's own
+synthetic-caption fixture (a small caption on a large plain background): a whole-frame
+MEAN absolute difference is the wrong dedup metric here, because a caption typically
+covers only a small fraction of total frame area, so its effect on the frame-wide mean
+is tiny -- measured directly: ~2.96/255 mean difference between a blank frame and the
+same frame with a one-line caption burned in, comfortably under a naively-picked
+threshold of 4.0, meaning the dedup check silently treated "caption just appeared" as
+"nothing changed" and suppressed every OCR call for the caption's entire visible
+duration. tests/test_ocr_track.py::test_synthetic_clip and
+::test_synthetic_clip_dedup_single_candidate caught this immediately (0 candidates
+instead of the expected match) -- exactly the kind of regression the existing ground-
+truth test suite exists to catch, not a coincidence.
+
+Root-caused with real numbers rather than re-guessing a threshold: measured the actual
+per-pixel difference on the same fixture -- 1.4% of pixels change by more than 30
+intensity levels when a genuine caption appears, vs. exactly 0% between two frames of
+identical static content. Replaced the dedup metric with fraction-of-substantially-
+changed-pixels (>30 intensity delta, >0.1% of frame) instead of the frame-wide mean --
+comfortably separates the two cases with over 10x margin. Also fixed a second bug in
+the same pass: the original gating logic set a skipped frame's OCR "lines" to empty
+(as if textless) rather than reusing the previous real OCR result -- the correct
+semantics for "this frame's content didn't change" is "assume the same result as
+before," not "assume there's nothing here." Both fixes verified: full
+tests/test_ocr_track.py suite (8/8) passes, and `python verify.py all` (all 8 phases)
+passes clean afterward. A real end-to-end CLI run against a fresh synthetic clip
+(silent audio, burned-in text at a known onset) through the actual gated code path
+confirmed exact frame accuracy (onset_s=4.0 at 25fps -> frame 100, reported exactly).
+
+Nothing else in the pipeline touched -- subtitle fast-path, ASR track, arbiter, refine,
+report, and the two-tier fetch logic are all unmodified.

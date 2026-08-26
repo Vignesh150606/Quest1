@@ -6,7 +6,7 @@ Introduced in Phase 1 (not Phase 4) because the subtitle fast-path already needs
 construct a Candidate, and both the ASR and OCR tracks (Phase 2/3) depend on this schema
 existing before they can run.
 
-See PHASES.md Phase 1 and CLAUDE.md's "Candidate schema" section.
+See CLAUDE.md's "Candidate schema" section.
 """
 
 from dataclasses import dataclass, field

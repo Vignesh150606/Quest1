@@ -12,7 +12,7 @@ Deterministic policy (see CLAUDE.md -- no ML calibration model):
   4. If modalities disagree beyond the tolerance window, return AmbiguousResult --
      never silently pick one and hide the disagreement.
 
-Verification (see PHASES.md): pytest tests/test_arbiter.py::test_reconciliation_policy
+Verification: pytest tests/test_arbiter.py::test_reconciliation_policy
 """
 
 from typing import Optional, Union

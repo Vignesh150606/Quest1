@@ -6,7 +6,7 @@ Wires: ingest -> (subtitle fast-path | ASR + OCR tracks) -> arbiter -> refine ->
 Usage:
     python -m src.main --url <video_url> --dialogue-text "<target phrase>" --output <dir>
 
-Verification (see PHASES.md): pytest tests/test_end_to_end.py::test_full_run
+Verification: pytest tests/test_end_to_end.py::test_full_run
 """
 
 import argparse

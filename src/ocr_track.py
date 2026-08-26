@@ -25,7 +25,17 @@ the whole video decoded in 1.9min. `_sample_frames` below uses that sequential p
 instead of seeking, selecting the identical frames (same fixed time grid) at a fraction
 of the cost -- a pure throughput fix, zero accuracy impact.
 
-Verification (see PHASES.md): pytest tests/test_ocr_track.py::test_synthetic_clip
+Pre-OCR gating (further hardening): OCR inference itself (0.334s/sample above) is still
+the largest remaining per-sample cost once seeking was removed. `_sample_frames` now
+skips the PaddleOCR call on a sampled frame that's either (a) visually unchanged from
+the last frame actually OCR'd -- provably redundant, not a heuristic -- or (b) has no
+edge-density evidence of containing any text at all -- a deliberately permissive
+heuristic (see `_has_text_like_content`'s comment) so it costs a few wasted OCR calls
+in the worst case rather than ever risking a missed match. Fixed-grid sample *selection*
+is unaffected -- every grid point still yields exactly one `_Sample`; gating only
+decides whether that sample's OCR actually runs.
+
+Verification: pytest tests/test_ocr_track.py::test_synthetic_clip
 """
 
 import contextlib
@@ -90,6 +100,59 @@ _CLUSTER_GAP_FACTOR = 1.5
 class _Sample:
     time_s: float
     lines: list  # list[tuple[text: str, confidence: float]]
+
+
+# Pre-OCR gating: skip the (comparatively expensive) PaddleOCR call on a sampled frame
+# when it's cheap to already tell OCR would be wasted work. Two independent, numpy-only
+# checks (no new dependency added -- both are plain array ops) applied in sequence:
+#   1. dedup: a frame whose content is ~identical to the last frame that WAS OCR'd would
+#      just reproduce the same OCR result -- provably safe to skip, not a heuristic.
+#   2. text-presence: rendered text is a region of many sharp intensity transitions: a
+#      near-uniform frame (a plain background, a black frame, letterboxing) essentially
+#      never contains legible text. This one IS a heuristic and could in principle skip
+#      a frame with very faint/low-contrast text, so the threshold below is deliberately
+#      permissive (biased toward "OCR it anyway" over "skip it") -- a missed frame here
+#      is a correctness regression, a wasted OCR call is just a few wasted milliseconds.
+#
+# Real bug, found by running against this project's own synthetic-caption fixture (a
+# small caption on a large plain background -- i.e. the exact case this gate exists to
+# help with): a whole-frame MEAN absolute difference is the wrong metric for "did a
+# caption just appear," because a caption typically covers only a small fraction of the
+# frame -- averaged across every pixel, its effect on the mean is tiny (measured
+# directly: ~2.96/255 mean difference between a blank frame and the same frame with a
+# one-line caption burned in, comfortably under a naively-chosen threshold of 4.0) even
+# though the caption itself is obviously, unmistakably new content. The fix measures
+# the FRACTION of pixels that changed substantially instead of the average change
+# across all of them -- measured on the same fixture: 1.4% of pixels for a genuine
+# caption appearing, vs. exactly 0% between two frames of identical static content --
+# an over 10x margin between "real change" and "no change" to threshold against.
+_DEDUP_PIXEL_DELTA = 30  # a single pixel must move by at least this much to count as "changed"
+_DEDUP_CHANGED_FRACTION = 0.001  # -- and at least this fraction of all pixels must do so
+_TEXT_PRESENCE_MIN_EDGE_DENSITY = 0.006  # fraction of pixels that must look like an edge
+
+
+def _grayscale(bgr: np.ndarray) -> np.ndarray:
+    """Luma approximation via a plain weighted sum -- avoids adding a cv2 dependency to
+    this module just for a grayscale conversion."""
+    return (0.114 * bgr[..., 0] + 0.587 * bgr[..., 1] + 0.299 * bgr[..., 2]).astype(np.float32)
+
+
+def _looks_unchanged(gray: np.ndarray, prev_gray: Optional[np.ndarray]) -> bool:
+    if prev_gray is None or prev_gray.shape != gray.shape:
+        return False
+    diff = np.abs(gray - prev_gray)
+    changed_fraction = float(np.count_nonzero(diff > _DEDUP_PIXEL_DELTA)) / diff.size
+    return changed_fraction < _DEDUP_CHANGED_FRACTION
+
+
+def _has_text_like_content(gray: np.ndarray) -> bool:
+    dx = np.abs(np.diff(gray, axis=1))
+    dy = np.abs(np.diff(gray, axis=0))
+    total = dx.size + dy.size
+    if total == 0:
+        return True
+    edge_pixels = int(np.count_nonzero(dx > 25)) + int(np.count_nonzero(dy > 25))
+    return (edge_pixels / total) >= _TEXT_PRESENCE_MIN_EDGE_DENSITY
 
 
 def _get_ocr() -> PaddleOCR:
@@ -196,6 +259,8 @@ def _sample_frames(container: av.container.InputContainer, stream, interval_s: f
 
     next_target = 0.0
     last_progress_at = 0.0
+    prev_gray: Optional[np.ndarray] = None
+    prev_lines: list = []
     for frame in container.decode(stream):
         if frame.pts is None:
             continue
@@ -204,7 +269,19 @@ def _sample_frames(container: av.container.InputContainer, stream, interval_s: f
             continue
 
         bgr = frame.to_ndarray(format="bgr24")
-        lines = _ocr_frame(bgr)
+        gray = _grayscale(bgr)
+        if _looks_unchanged(gray, prev_gray):
+            # Same visual content as the last frame actually OCR'd -- reuse ITS result
+            # rather than treating this frame as textless. The point of dedup is "this
+            # would read the same," not "this has nothing on it"; a genuinely static
+            # caption still needs to register as present at every sample point across
+            # its whole visible duration; ocr_track.py's clustering step is what
+            # collapses those repeats into one candidate, not this loop.
+            lines = prev_lines
+        else:
+            prev_gray = gray
+            lines = _ocr_frame(bgr) if _has_text_like_content(gray) else []
+            prev_lines = lines
         yield _Sample(time_s=frame_time, lines=lines)
 
         if frame_time - last_progress_at >= _PROGRESS_INTERVAL_S:

@@ -10,9 +10,6 @@ Each phase's test starts marked @pytest.mark.skip until you implement that phase
 src module. Remove the skip decorator for the phase you just built, then run
 `python verify.py N` for that phase specifically. Running a still-skipped phase will
 report "skipped", not pass/fail -- that's expected, not a bug in this script.
-
-Phase 7 (Packaging) isn't a pytest target -- it's verified manually via the docker
-build/run command in PHASE_CHECKLIST.md.
 """
 
 import subprocess
@@ -30,13 +27,6 @@ PHASE_TESTS = {
 
 
 def run_phase(n: int) -> bool:
-    if n == 7:
-        print(
-            "Phase 7 is verified manually -- see PHASE_CHECKLIST.md for the "
-            "docker build/run command."
-        )
-        return True
-
     target = PHASE_TESTS.get(n)
     if target is None:
         print(f"No phase {n}")
@@ -57,7 +47,7 @@ def main():
 
     arg = sys.argv[1]
     if arg == "all":
-        results = {n: run_phase(n) for n in list(PHASE_TESTS) + [7]}
+        results = {n: run_phase(n) for n in PHASE_TESTS}
         print("\n=== Summary ===")
         for n in sorted(results):
             print(f"Phase {n}: {'OK' if results[n] else 'FAIL'}")

@@ -1,7 +1,7 @@
 """
 Shared text normalization + fuzzy matching (Phase 1).
 
-Not in PHASES.md's file list for Phase 1 (which names only ingest.py, types.py,
+Not in the original Phase 1 file list (which named only ingest.py, types.py,
 test_ingest.py). Added anyway because the arbiter (Phase 4) compares Candidate.similarity
 scores across modalities -- subtitle, ASR, and OCR -- and that comparison is only
 meaningful if all three normalize and score text the same way. Phase 1's subtitle

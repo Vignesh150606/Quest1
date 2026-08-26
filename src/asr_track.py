@@ -39,7 +39,7 @@ search than beam_size=5), accepted here because the pipeline fuzzy-matches the r
 against a target phrase rather than requiring a word-perfect transcript -- callers
 wanting the old wider search can still pass beam_size=5 explicitly.
 
-Verification (see PHASES.md): pytest tests/test_asr_track.py::test_example_video
+Verification: pytest tests/test_asr_track.py::test_example_video
 (network/model-dependent; verify.py 2 runs the offline word-window-matching suite --
 see PHASES_1_7_PLAN.md for why).
 """
