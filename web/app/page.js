@@ -118,7 +118,7 @@ export default function Home() {
             <span>What are you looking for?</span>
             <input
               type="text"
-              placeholder="I'm in love with the shape of you"
+              placeholder="My mind rebels at stagnation"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               disabled={isBusy}
