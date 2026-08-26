@@ -6,12 +6,29 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile.api
     dockerContext: .
-    # faster-whisper "small" (int8) + PaddleOCR both load real models into memory --
-    # unverified exactly how much Render's plan tiers need since this hasn't been
-    # deployed there yet (flagging rather than guessing): Render's free/starter tier
-    # (512MB) is very likely too small. Start at "standard" and downsize only after
-    # watching real memory usage in the Render dashboard.
-    plan: standard
+    # Free tier: 512MB RAM, 0.1 CPU, spins down after 15min idle (~1min cold start on
+    # the next request), 750 free instance-hours/month. Real, load-bearing tradeoffs
+    # this makes, not silently absorbed -- see the env vars below and README.md's
+    # "Web App" section for the full picture:
+    #   - QUEST1_SKIP_OCR=true: PaddleOCR is lazy-loaded (see src/ocr_track.py's
+    #     _get_ocr()) and only actually allocates its model weights on first real OCR
+    #     call, so skipping it keeps the free tier's 512MB from ever having to hold
+    #     both faster-whisper AND PaddleOCR at once. Trade-off: a video whose answer
+    #     is caption/on-screen text only, with no subtitle track and no confident ASR
+    #     hit, will report not_found on this deployment instead of finding it -- the
+    #     local Python fallback or a paid Render plan (QUEST1_SKIP_OCR=false) still
+    #     has the full three-track pipeline.
+    #   - Whisper "small" is kept as-is (not silently downgraded to a smaller/weaker
+    #     model) even though it's the bigger of the two remaining memory consumers --
+    #     asr_track.py's own docstring documents "small" as a deliberate accuracy
+    #     choice. If it OOMs in practice, QUEST1_MODEL_SIZE=base is the documented,
+    #     explicit lever to trade accuracy for headroom -- not done by default here.
+    #   - QUEST1_MAX_CONCURRENT_JOBS=1: 0.1 CPU can't usefully run two ML jobs at once
+    #     anyway; a second concurrent job would only add memory pressure.
+    # None of this has been load-tested against Render's actual infra yet (no Render
+    # account access from this environment) -- if it OOMs in practice, that's the next
+    # real data point, and QUEST1_MODEL_SIZE=base is the first thing to try.
+    plan: free
     healthCheckPath: /api/health
     envVars:
       # Comma-separated list of allowed frontend origins (see api/app.py). Set this to
@@ -19,10 +36,9 @@ services:
       # reject the browser's requests until it's set correctly.
       - key: ALLOWED_ORIGINS
         value: https://your-app.vercel.app
-      # Set to "true" if PaddleOCR crashes on Render the same way it does under Docker
-      # Desktop's WSL2 locally (see Dockerfile.api's comment) -- unverified until
-      # deployed. Subtitle/ASR paths are unaffected either way.
       - key: QUEST1_SKIP_OCR
-        value: "false"
+        value: "true"
+      - key: QUEST1_MODEL_SIZE
+        value: "small"
       - key: QUEST1_MAX_CONCURRENT_JOBS
-        value: "2"
+        value: "1"

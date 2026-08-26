@@ -214,16 +214,31 @@ Open `http://localhost:3000`. The backend's default `ALLOWED_ORIGINS` already in
      `Dockerfile.api` manually.
 3. Set the `ALLOWED_ORIGINS` env var to your Vercel URL once you have it (step 3 below)
    — until then CORS will reject the browser's requests, which is expected.
-4. **Plan size**: faster-whisper ("small") and PaddleOCR both load real models into
-   memory. This has not been load-tested on Render's infra — start on at least the
-   "Standard" plan (`render.yaml` defaults to it) rather than the free/starter tier,
-   and watch actual memory usage in the dashboard before downsizing.
+4. **Free tier, by design** (`render.yaml` sets `plan: free`): 512MB RAM, 0.1 CPU,
+   spins down after 15min idle (~1min cold start on the next request), 750 free
+   instance-hours/month. To fit real ML models into that, `render.yaml` also sets:
+   - `QUEST1_SKIP_OCR=true` — PaddleOCR is lazy-loaded (`src/ocr_track.py`'s
+     `_get_ocr()`), so skipping it means its model weights never get allocated at
+     all, leaving the 512MB budget to faster-whisper alone. **Trade-off**: a video
+     whose answer is on-screen/caption text only (no subtitle track, no confident ASR
+     hit) will report `not_found` on this free deployment. The full three-track
+     pipeline is still available via a paid Render plan (`QUEST1_SKIP_OCR=false`) or
+     the local Python fallback above.
+   - `QUEST1_MODEL_SIZE=small` is left as-is, not silently downgraded, even though
+     it's the larger of the two remaining memory consumers (`src/asr_track.py`
+     documents "small" as a deliberate accuracy choice over "base"). If it OOMs in
+     practice on Render's actual infra (unverified from here — no Render account
+     access in this environment), `QUEST1_MODEL_SIZE=base` is the documented lever to
+     trade accuracy for headroom, applied explicitly, not by default.
+   - `QUEST1_MAX_CONCURRENT_JOBS=1` — 0.1 CPU can't usefully run two ML jobs at once.
+   Want the full pipeline with more headroom instead? Change `plan: free` to
+   `plan: standard` and `QUEST1_SKIP_OCR` to `false` in `render.yaml` before deploying.
 5. **OCR-in-Docker risk**: the CLI's own Dockerfile hit a real, unresolved
    PaddlePaddle/oneDNN crash specifically under Docker Desktop's WSL2 on the dev
    machine (see that Dockerfile's comments) — whether Render's container host hits the
-   same issue is *unverified* until actually deployed there. If it does, set
-   `QUEST1_SKIP_OCR=true` as an immediate mitigation (subtitle/ASR paths are
-   unaffected either way) while investigating further.
+   same issue is *unverified* until actually deployed there. Moot while
+   `QUEST1_SKIP_OCR=true` (the free-tier default above), relevant again if you switch
+   to a paid plan with OCR enabled.
 
 ### Deploying the frontend to Vercel
 
@@ -239,8 +254,9 @@ Open `http://localhost:3000`. The backend's default `ALLOWED_ORIGINS` already in
 |---|---|---|
 | `NEXT_PUBLIC_API_URL` | `web/.env.example` (Vercel) | Backend base URL the browser calls |
 | `ALLOWED_ORIGINS` | `.env.example` (Render) | Comma-separated frontend origins allowed by CORS |
-| `QUEST1_SKIP_OCR` | `.env.example` (Render) | Force-disable OCR (mitigation for the Docker/oneDNN issue above) |
-| `QUEST1_MAX_CONCURRENT_JOBS` | `.env.example` (Render) | Background thread-pool size (default 2) |
+| `QUEST1_SKIP_OCR` | `.env.example` (Render) | Force-disable OCR (default `true` on the free-tier `render.yaml` to fit 512MB RAM; also a mitigation for the Docker/oneDNN issue above) |
+| `QUEST1_MODEL_SIZE` | `.env.example` (Render) | faster-whisper model size (default `small`; lower to `base` only if you hit real OOM on a constrained plan) |
+| `QUEST1_MAX_CONCURRENT_JOBS` | `.env.example` (Render) | Background thread-pool size (default 1 on free tier, since 0.1 CPU can't usefully run two ML jobs at once) |
 | `QUEST1_OUTPUT_ROOT` | `.env.example` (Render) | Where per-job `report.json`/PNGs are written |
 | `QUEST1_WORK_DIR` | `.env.example` (Render) | yt-dlp/audio cache dir (same meaning as the CLI's `--work-dir`) |
 
@@ -258,8 +274,16 @@ hold a real credential.
   span multiple processes or instances. Scaling out requires the Redis/RQ swap noted
   above.
 - **OCR-in-container risk is unverified on Render** — see step 5 above.
-- **Whisper/PaddleOCR memory footprint on Render is unmeasured** — start on a larger
-  plan and downsize based on real usage, not a guess.
+- **Free-tier deployment runs a reduced pipeline, on purpose**: OCR is off by default
+  to fit 512MB RAM (see step 4 above) — subtitle + ASR only. A video that genuinely
+  needs OCR (burned-in/on-screen text, no subtitle track, no confident speech match)
+  will report `not_found` on the free deployment specifically, not on the CLI/local
+  Python path, which still runs all three tracks.
+- **Cold starts**: free tier spins down after 15min idle; the first request after that
+  takes up to ~1min to wake the instance before a job even starts processing.
+- **Whisper's actual memory footprint on Render's free tier is unmeasured** — the
+  512MB budget is tight even with OCR off; `QUEST1_MODEL_SIZE=base` is the documented
+  fallback if it OOMs in practice.
 
 ## Repository Structure
 

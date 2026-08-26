@@ -36,6 +36,11 @@ _executor = ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_JOBS, thread_name_pre
 _OUTPUT_ROOT = os.environ.get("QUEST1_OUTPUT_ROOT", "./output")
 _WORK_DIR = os.environ.get("QUEST1_WORK_DIR")  # None -> ingest.py's own default
 _SKIP_OCR = os.environ.get("QUEST1_SKIP_OCR", "false").lower() in ("1", "true", "yes")
+# faster-whisper model size (same meaning as the CLI's --model). Left at the pipeline's
+# own "small" default unless overridden -- exists as a real, explicit lever (not a
+# silent downgrade) for fitting Render's free-tier 512MB RAM, since asr_track.py's own
+# docstring documents "small" as a deliberate accuracy choice over "base".
+_MODEL_SIZE = os.environ.get("QUEST1_MODEL_SIZE", "small")
 
 _lock = threading.Lock()
 _JOBS: dict[str, dict] = {}
@@ -93,6 +98,7 @@ def _run_job(job_id: str, video_url: str, query: str) -> None:
             video_url,
             query,
             output_dir,
+            model_size=_MODEL_SIZE,
             work_dir=_WORK_DIR,
             skip_ocr=_SKIP_OCR,
         )
