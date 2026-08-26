@@ -198,6 +198,20 @@ Why: Closing the exact gap surfaced by prompt 15: making sure this conversation'
 history actually makes it into the submitted repo, in the audit-record format the
 problem statement requires.
 
+17. [Claude, chat] -- While Phase 3 was running in Claude Code, asked whether OCR was
+actually required at all, given that the example video shows a person speaking the
+dialogue on-camera with no visible caption -- suggested treating OCR as an additional
+feature rather than the main path, staying centered on the spoken-dialogue case, and
+asked to carry this framing into CLAUDE.md, plus a final check for anything missed from
+the problem statement.
+Why: A scope-guarding check mid-build -- re-confirmed against the actual manual
+video review (Brett speaking on-camera, no caption at the target timestamp) that ASR
+was the primary path for the example, not OCR. Resolved by keeping OCR as the
+documented dual-track design (the evaluator may swap in a caption-overlay video, so OCR
+still needed to exist) rather than dropping it, but this is why CLAUDE.md explicitly
+frames the OCR track as handling a case the *example* doesn't exercise, and why ASR's
+"small" model size and accuracy trade-offs got more attention than OCR's.
+
 [Claude Code] -- Asked to merge session_prompts_log.md into prompts.txt.
 Why: Final step closing the loop from prompt 16 -- getting the human-curated
 pre-Claude-Code prompt record into the actual submitted audit file rather than leaving
