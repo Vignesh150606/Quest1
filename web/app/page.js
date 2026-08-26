@@ -62,7 +62,20 @@ export default function Home() {
   async function pollJob(jobId) {
     try {
       const res = await fetch(`${API_URL}/api/jobs/${jobId}`);
-      if (!res.ok) return; // transient network blip -- try again on the next tick
+      if (res.status === 404) {
+        // Unlike a 500 or a network blip, a 404 here means this exact job_id will
+        // never come back (e.g. a free-tier backend instance restarted mid-job and
+        // lost its in-memory job store -- see api/jobs.py's docstring). Retrying
+        // forever would leave the user staring at "Processing..." indefinitely, so
+        // stop polling and surface it as a real failure instead of a silent hang.
+        clearInterval(pollRef.current);
+        setJob({
+          status: "failed",
+          error: "Lost track of this job -- the server may have restarted while it was running. Please try again.",
+        });
+        return;
+      }
+      if (!res.ok) return; // other transient network blip -- try again on the next tick
       const body = await res.json();
       setJob(body);
       if (["completed", "not_found", "failed"].includes(body.status)) {

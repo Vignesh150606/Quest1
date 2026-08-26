@@ -1,18 +1,18 @@
 """
-In-process job store + background worker for the web API.
+In-process job store + background worker for the local web API.
 
-Deliberately the simplest thing that's reliable for a first deployment (per the web
-app spec): a dict guarded by a lock, and a small ThreadPoolExecutor. No Redis, no
-Celery/RQ -- those become worth the added moving parts only once a single Render
-process is provably not enough (multi-instance scaling, surviving a process restart
-mid-job, etc.), none of which is true yet. The one hard constraint this design
-implies: the API process must run with a single worker (see api/app.py / Dockerfile.api
--- `uvicorn ... --workers 1`), since a second worker process would have its own,
-disconnected copy of _JOBS and never see jobs created by the first.
+Deliberately the simplest thing that's reliable for a single personal computer: a dict
+guarded by a lock, and a small ThreadPoolExecutor. No Redis, no Celery/RQ, no Docker --
+this is a single Python process running on the same machine as the pipeline itself, so
+there's nothing to coordinate across. The one hard constraint this design implies: the
+API process must run as a single `uvicorn` worker (the default when you just run
+`uvicorn api.app:app`, no `--workers N`), since a second worker process would have its
+own, disconnected copy of _JOBS and never see jobs created by the first.
 
-Swapping to a real queue later means replacing create_job()'s executor.submit() call
-with e.g. an RQ enqueue() and _JOBS's dict with a Redis hash -- get_job()'s and the
-API layer's shape (job_id -> status dict) doesn't need to change.
+If this ever needed to become a multi-machine or multi-process service, swapping to a
+real queue would mean replacing create_job()'s executor.submit() call with e.g. an RQ
+enqueue() and _JOBS's dict with a Redis hash -- get_job()'s and the API layer's shape
+(job_id -> status dict) doesn't need to change. Not needed for local use.
 """
 
 import logging
@@ -26,10 +26,10 @@ from src.main import run_pipeline
 
 logger = logging.getLogger("api.jobs")
 
-# Small on purpose: this runs on a single Render web service instance (see module
-# docstring), and each job is itself CPU-heavy (ASR/OCR) -- a handful of concurrent
-# jobs would just thrash for CPU rather than finish any faster. 2 lets one job process
-# while another finishes queueing/downloading without the whole service feeling wedged.
+# Small on purpose: each job is itself CPU-heavy (ASR/OCR), so a handful of concurrent
+# jobs on one machine would just thrash for CPU rather than finish any faster. 2 lets
+# one job process while another finishes queueing/downloading without the whole app
+# feeling wedged. Raise via QUEST1_MAX_CONCURRENT_JOBS if your machine has cores to spare.
 _MAX_CONCURRENT_JOBS = int(os.environ.get("QUEST1_MAX_CONCURRENT_JOBS", "2"))
 _executor = ThreadPoolExecutor(max_workers=_MAX_CONCURRENT_JOBS, thread_name_prefix="job")
 
@@ -37,9 +37,10 @@ _OUTPUT_ROOT = os.environ.get("QUEST1_OUTPUT_ROOT", "./output")
 _WORK_DIR = os.environ.get("QUEST1_WORK_DIR")  # None -> ingest.py's own default
 _SKIP_OCR = os.environ.get("QUEST1_SKIP_OCR", "false").lower() in ("1", "true", "yes")
 # faster-whisper model size (same meaning as the CLI's --model). Left at the pipeline's
-# own "small" default unless overridden -- exists as a real, explicit lever (not a
-# silent downgrade) for fitting Render's free-tier 512MB RAM, since asr_track.py's own
-# docstring documents "small" as a deliberate accuracy choice over "base".
+# own "small" default unless overridden -- asr_track.py's own docstring documents
+# "small" as a deliberate accuracy choice over "base". QUEST1_MODEL_SIZE is a real,
+# explicit lever if you want to trade accuracy for speed on a slower machine -- not
+# lowered by default.
 _MODEL_SIZE = os.environ.get("QUEST1_MODEL_SIZE", "small")
 
 _lock = threading.Lock()

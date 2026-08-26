@@ -150,39 +150,49 @@ pytest -m network tests/ -v
 
 See `PHASE_CHECKLIST.md` for the phase-by-phase build order.
 
-## Web App (Vercel + Render)
+## Local Web App
 
-The CLI above is the graded core; this is an optional web wrapper around the *same*
+The CLI above is the graded core; this is an optional browser UI around the *same*
 pipeline (`src/main.run_pipeline`) — the API layer never duplicates pipeline logic, it
-only calls it. Long jobs (a 54-minute video can take many minutes for ASR/OCR) run in
-a background thread so the browser never blocks on a single HTTP request:
+only calls it, exactly like the CLI does. Everything — `yt-dlp`, ffmpeg, faster-whisper,
+PaddleOCR — runs on **your own machine**, using its CPU/RAM/storage, the same as running
+the CLI directly. There is no remote processing service. Long jobs (a 54-minute video
+can take many minutes for ASR/OCR) run in a background thread on your machine so the
+browser never blocks on a single HTTP request:
 
 ```
-Browser --(POST /api/jobs)--> FastAPI (Render) --submits to a background thread-->
-   run_pipeline() [same code the CLI calls]
+Browser (localhost:3000) --(POST /api/jobs)--> FastAPI (localhost:8000, your machine)
+   --submits to a background thread--> run_pipeline() [same code the CLI calls]
 Browser --(poll GET /api/jobs/{id} every ~2.5s)--> FastAPI --> queued/processing/completed/not_found/failed
 ```
 
-- **Frontend** (`web/`): Next.js (App Router), deployed to Vercel. One page: URL +
-  phrase inputs, a status area, a result card (timestamp, matched text, frame image),
-  a "Search again" reset. No UI framework, no state library — plain `fetch` + `useState`.
-- **Backend** (`api/`): FastAPI, deployed to Render as a Docker web service. `api/jobs.py`
-  is an in-memory `dict` + `ThreadPoolExecutor` — deliberately the simplest thing that's
-  reliable for a first deployment (see its module docstring for the tradeoffs and how to
-  swap in a real queue like RQ/Celery later, if a single Render instance ever proves
-  insufficient). This is also why the API **must run with a single worker process**
-  (`--workers 1`, already set in `Dockerfile.api`) — a second worker would have its own,
-  disconnected job dict.
+- **Frontend** (`web/`): Next.js (App Router). One page: URL + phrase inputs, a status
+  area, a result card (timestamp, matched text, frame image), a "Search again" reset.
+  No UI framework, no state library — plain `fetch` + `useState`.
+- **Backend** (`api/`): FastAPI, run locally with `uvicorn` — no Docker, no cloud
+  service. `api/jobs.py` is an in-memory `dict` + `ThreadPoolExecutor`, deliberately
+  the simplest thing that's reliable for one machine with no other jobs to coordinate
+  across (see its module docstring). This is also why the API **must run as a single
+  `uvicorn` worker** (the default — don't pass `--workers N`) — a second worker
+  process would have its own, disconnected job dict.
 - **Job states**: `queued` → `processing` → one of `completed` / `not_found` / `failed`.
   `not_found` means the pipeline ran correctly and the phrase genuinely wasn't found
   (same meaning as the CLI's `status: "not_found"`) — not an error. `failed` carries a
   short, human-readable `error` message (the same text the CLI prints as `Error: ...`);
-  full tracebacks are logged server-side only, never sent to the browser.
-- **Files**: each job writes to `output/<job_id>/` on the Render instance's own disk
-  (report.json + the winning frame PNG). The frontend never receives raw files from
-  Vercel — it fetches the frame through `GET /api/jobs/{id}/frame`, which streams the
-  PNG from the backend. This disk is **not** treated as permanent — it only needs to
-  survive long enough for one browser session to poll and view its own result.
+  full tracebacks are logged server-side (your own terminal) only, never sent to the
+  browser. If the backend process restarts while a job is running (you stopped it,
+  it crashed), that job's in-memory state is gone — the frontend detects the resulting
+  404 on its next poll and shows "Lost track of this job... Please try again" instead
+  of polling forever.
+- **Files**: each job writes to `output/<job_id>/` on your machine (report.json + the
+  winning frame PNG) — the same output directory the CLI already uses, just one
+  subfolder per job instead of one shared directory. The frontend never receives raw
+  image bytes as JSON — it fetches the frame through `GET /api/jobs/{id}/frame`, which
+  streams the PNG file directly.
+- **Cache**: unchanged from the CLI — `prepare_asset()` in `ingest.py` still keys its
+  download cache by a hash of the video URL under `./.cache` (or `$QUEST1_WORK_DIR`),
+  and a job re-run against an already-cached video reuses it instead of re-downloading,
+  exactly as before. The API doesn't touch this logic at all.
 
 ### Local development
 
@@ -191,99 +201,65 @@ Two processes, run in separate terminals from the repo root:
 ```bash
 # Terminal 1 -- backend (same venv as the CLI; see Quick Start (Local Fallback) above)
 pip install -r requirements.txt   # now also installs fastapi/uvicorn
-uvicorn api.app:app --reload --port 8000
+uvicorn api.app:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 ```bash
 # Terminal 2 -- frontend
 cd web
-cp .env.example .env.local        # NEXT_PUBLIC_API_URL=http://localhost:8000
+cp .env.example .env.local        # NEXT_PUBLIC_API_URL=http://127.0.0.1:8000
 npm install
 npm run dev
 ```
 
 Open `http://localhost:3000`. The backend's default `ALLOWED_ORIGINS` already includes
-`http://localhost:3000`, so no CORS setup is needed locally.
+`http://localhost:3000`, so no CORS setup is needed for local use.
 
-### Deploying the backend to Render
+### About deploying the frontend to Vercel
 
-1. Push this repo to GitHub (already required for submission).
-2. In Render: **New → Blueprint**, point it at the repo — it picks up `render.yaml`
-   automatically (it builds `Dockerfile.api`, not the CLI's `Dockerfile`).
-   - No Blueprint? New → Web Service → Docker → set **Dockerfile Path** to
-     `Dockerfile.api` manually.
-3. Set the `ALLOWED_ORIGINS` env var to your Vercel URL once you have it (step 3 below)
-   — until then CORS will reject the browser's requests, which is expected.
-4. **Free tier, by design** (`render.yaml` sets `plan: free`): 512MB RAM, 0.1 CPU,
-   spins down after 15min idle (~1min cold start on the next request), 750 free
-   instance-hours/month. To fit real ML models into that, `render.yaml` also sets:
-   - `QUEST1_SKIP_OCR=true` — PaddleOCR is lazy-loaded (`src/ocr_track.py`'s
-     `_get_ocr()`), so skipping it means its model weights never get allocated at
-     all, leaving the 512MB budget to faster-whisper alone. **Trade-off**: a video
-     whose answer is on-screen/caption text only (no subtitle track, no confident ASR
-     hit) will report `not_found` on this free deployment. The full three-track
-     pipeline is still available via a paid Render plan (`QUEST1_SKIP_OCR=false`) or
-     the local Python fallback above.
-   - `QUEST1_MODEL_SIZE=small` is left as-is, not silently downgraded, even though
-     it's the larger of the two remaining memory consumers (`src/asr_track.py`
-     documents "small" as a deliberate accuracy choice over "base"). If it OOMs in
-     practice on Render's actual infra (unverified from here — no Render account
-     access in this environment), `QUEST1_MODEL_SIZE=base` is the documented lever to
-     trade accuracy for headroom, applied explicitly, not by default.
-   - `QUEST1_MAX_CONCURRENT_JOBS=1` — 0.1 CPU can't usefully run two ML jobs at once.
-   Want the full pipeline with more headroom instead? Change `plan: free` to
-   `plan: standard` and `QUEST1_SKIP_OCR` to `false` in `render.yaml` before deploying.
-5. **OCR-in-Docker risk**: the CLI's own Dockerfile hit a real, unresolved
-   PaddlePaddle/oneDNN crash specifically under Docker Desktop's WSL2 on the dev
-   machine (see that Dockerfile's comments) — whether Render's container host hits the
-   same issue is *unverified* until actually deployed there. Moot while
-   `QUEST1_SKIP_OCR=true` (the free-tier default above), relevant again if you switch
-   to a paid plan with OCR enabled.
+The frontend *can* still be deployed to Vercel as a static Next.js site — nothing stops
+that. But be clear about what that does and doesn't get you:
 
-### Deploying the frontend to Vercel
-
-1. In Vercel: **New Project**, import this repo, set **Root Directory** to `web`.
-2. Add the environment variable `NEXT_PUBLIC_API_URL` = your Render backend's URL
-   (e.g. `https://quest1-api.onrender.com`), no trailing slash.
-3. Deploy. Copy the resulting `https://....vercel.app` URL back into Render's
-   `ALLOWED_ORIGINS` (step 3 above) and redeploy the backend so CORS allows it.
+- **Vercel = frontend only.** The actual video processing (`yt-dlp`, ffmpeg, Whisper,
+  PaddleOCR) is not something that belongs in a Vercel serverless function — it's a
+  long-running, CPU-heavy local process, and Vercel's functions aren't built for that.
+- **A Vercel-hosted frontend cannot reach a backend running on your own computer.**
+  `http://127.0.0.1:8000` means "this machine" to whoever's browser is loading the
+  page — for someone else (or even you, on a different device) visiting your Vercel
+  URL, that address resolves to *their* machine, not yours, and there's nothing
+  running there. This isn't a bug to fix; it's what "local backend" means. Making a
+  deployed frontend reach your machine would require exposing it to the internet
+  (a tunnel like `ngrok`, port forwarding, or hosting the backend somewhere reachable
+  — which is what the earlier Render-based deployment did, now removed per this
+  project's current direction).
+- **For local development and actually running searches**, run both pieces on the same
+  machine as shown above — that's the supported path.
 
 ### Environment variables
 
 | Var | Where | Meaning |
 |---|---|---|
-| `NEXT_PUBLIC_API_URL` | `web/.env.example` (Vercel) | Backend base URL the browser calls |
-| `ALLOWED_ORIGINS` | `.env.example` (Render) | Comma-separated frontend origins allowed by CORS |
-| `QUEST1_SKIP_OCR` | `.env.example` (Render) | Force-disable OCR (default `true` on the free-tier `render.yaml` to fit 512MB RAM; also a mitigation for the Docker/oneDNN issue above) |
-| `QUEST1_MODEL_SIZE` | `.env.example` (Render) | faster-whisper model size (default `small`; lower to `base` only if you hit real OOM on a constrained plan) |
-| `QUEST1_MAX_CONCURRENT_JOBS` | `.env.example` (Render) | Background thread-pool size (default 1 on free tier, since 0.1 CPU can't usefully run two ML jobs at once) |
-| `QUEST1_OUTPUT_ROOT` | `.env.example` (Render) | Where per-job `report.json`/PNGs are written |
-| `QUEST1_WORK_DIR` | `.env.example` (Render) | yt-dlp/audio cache dir (same meaning as the CLI's `--work-dir`) |
+| `NEXT_PUBLIC_API_URL` | `web/.env.example` | Backend base URL the browser calls (`http://127.0.0.1:8000` locally) |
+| `ALLOWED_ORIGINS` | `.env.example` | Comma-separated frontend origins allowed by CORS (`http://localhost:3000` by default) |
+| `QUEST1_SKIP_OCR` | `.env.example` | Force-disable OCR regardless of confidence (off by default — your machine runs the full pipeline) |
+| `QUEST1_MODEL_SIZE` | `.env.example` | faster-whisper model size (default `small`; lower to `base` only if your machine is slow enough that it matters) |
+| `QUEST1_MAX_CONCURRENT_JOBS` | `.env.example` | Background thread-pool size (default 2) |
+| `QUEST1_OUTPUT_ROOT` | `.env.example` | Where per-job `report.json`/PNGs are written |
+| `QUEST1_WORK_DIR` | `.env.example` | yt-dlp/audio cache dir (same meaning as the CLI's `--work-dir`) |
 
 No secrets/API keys are required anywhere in this project — nothing above should ever
 hold a real credential.
 
 ### Limitations (documented, not silently ignored)
 
-- **No process restart durability**: a job's status lives in memory; if the Render
-  instance restarts mid-job, that job's progress is lost (the browser would see the
-  poll requests start failing/timing out). Acceptable for a first deployment per the
-  brief; the fix is a real queue + persistent store, deliberately not built now (see
-  `api/jobs.py`'s docstring).
-- **Single Render instance only** (`--workers 1`) — the in-memory job store does not
-  span multiple processes or instances. Scaling out requires the Redis/RQ swap noted
-  above.
-- **OCR-in-container risk is unverified on Render** — see step 5 above.
-- **Free-tier deployment runs a reduced pipeline, on purpose**: OCR is off by default
-  to fit 512MB RAM (see step 4 above) — subtitle + ASR only. A video that genuinely
-  needs OCR (burned-in/on-screen text, no subtitle track, no confident speech match)
-  will report `not_found` on the free deployment specifically, not on the CLI/local
-  Python path, which still runs all three tracks.
-- **Cold starts**: free tier spins down after 15min idle; the first request after that
-  takes up to ~1min to wake the instance before a job even starts processing.
-- **Whisper's actual memory footprint on Render's free tier is unmeasured** — the
-  512MB budget is tight even with OCR off; `QUEST1_MODEL_SIZE=base` is the documented
-  fallback if it OOMs in practice.
+- **No process restart durability**: a job's status lives in memory; if you stop or
+  restart the `uvicorn` process mid-job, that job's progress is lost. The frontend
+  handles this gracefully (see "Job states" above) rather than hanging, but the job
+  itself has to be re-submitted.
+- **Single process only** — the in-memory job store does not span multiple `uvicorn`
+  worker processes. Not a real constraint for one person on one machine.
+- **A Vercel-hosted frontend can't reach your local backend** — see above. This is a
+  fundamental property of "local backend," not a missing feature.
 
 ## Repository Structure
 
@@ -306,8 +282,6 @@ web/
 tests/            pytest suite, one file per src/ module above, plus api/ and fixtures/
 verify.py         Runs one phase's (or all phases') offline test suite
 Dockerfile        CLI image (primary submission artifact)
-Dockerfile.api    Backend API image (Render)
-render.yaml       Render Blueprint for the backend
 APPROACH.md       Design rationale, trade-offs, and known limitations
 PHASES.md         Original phase specification
 PHASES_1_7_PLAN.md  Detailed per-phase implementation plan (historical)

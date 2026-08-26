@@ -4,7 +4,7 @@ for the job store/background-worker design. This layer's only job is: validate i
 create/read jobs, serve the winning frame image -- it must never duplicate pipeline logic.
 
 Run locally:
-    uvicorn api.app:app --reload --port 8000
+    uvicorn api.app:app --host 127.0.0.1 --port 8000 --reload
 """
 
 import os
@@ -18,11 +18,12 @@ from api.jobs import create_job, frame_image_path, get_job
 
 app = FastAPI(title="Quest1 Video Dialogue Finder API")
 
-# Comma-separated list of allowed frontend origins, e.g. "https://myapp.vercel.app".
-# Defaults to the local Next.js dev server so `npm run dev` + `uvicorn` work together
-# out of the box; production deployments must set ALLOWED_ORIGINS explicitly (see
-# render.yaml / README) -- allow_origins=["*"] is deliberately not used here since a
-# real origin can be configured.
+# Comma-separated list of allowed frontend origins. Defaults to the local Next.js dev
+# server so `npm run dev` + `uvicorn` work together out of the box with zero config.
+# If the frontend is also deployed elsewhere (e.g. Vercel, purely as a static UI --
+# see README's "Local Web App" section for why that deployment can't reach a backend
+# on your own machine over the internet), set ALLOWED_ORIGINS explicitly for that case
+# too. allow_origins=["*"] is deliberately not used since a real origin can be named.
 _allowed_origins = [
     o.strip()
     for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000").split(",")

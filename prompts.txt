@@ -1352,3 +1352,105 @@ full existing test suite (all 7 original phases, verify.py all) passes exactly a
 before -- confirmed by re-running it after every change in this session, not assumed.
 
 ---
+
+User asked (verbatim, condensed): "Convert Existing CLI into a Local Web Application --
+I want to completely remove the Render backend from this project... The existing
+pipeline should continue running locally on my own computer... Do NOT rewrite the
+existing pipeline... Important: do not use Docker... Do not introduce Redis, Celery,
+Docker, Kubernetes... unless the existing project genuinely requires it... First
+inspect the repository and explain the proposed changes. Then implement them
+incrementally and run the existing regression suite after the major changes." This
+followed directly from finding a real bug on the (now being removed) Render
+deployment: a job silently lost mid-processing when the free-tier instance restarted,
+with the frontend polling forever and showing nothing wrong.
+
+Inspected before touching anything (per the request's own instruction) and reported
+back what was ALREADY exactly the requested local architecture vs. what was
+Render-specific cruft, before changing a line: api/jobs.py's in-memory dict +
+ThreadPoolExecutor was already "a background worker appropriate for a single local
+machine" with no Redis/Celery -- built that way from the start, not something to
+redo. api/app.py's endpoints already matched the requested shape exactly
+(health/jobs/jobs-id/jobs-id-frame). web/app/page.js's "lost job" 404-handling (built
+last turn, against the live Render bug) already satisfied "do not silently continue
+polling forever" as-is. The CLI was untouched this whole session. None of
+ingest.py/asr_track.py/ocr_track.py/arbiter.py/refine.py/report.py/text_match.py were
+touched by any of this, before or after.
+
+Removed: render.yaml, Dockerfile.api (deleted entirely -- no Docker for this
+architecture, per explicit instruction; the CLI's own separate Dockerfile is untouched,
+since that's a pre-existing, already-graded packaging artifact for the CLI, not part of
+this web-app request). Grepped the whole repo for "Render"/"RENDER_"/"onrender.com"
+(excluding .venv/node_modules/.next/.git) to find every reference rather than guessing
+at scope -- found 10 files; one (src/ingest.py) was a false positive (caption
+*rendering*, unrelated) and left alone; the rest were Render-flavored comments/docs in
+api/jobs.py, api/app.py, requirements.txt, both .env.example files, and README.md's
+whole "Web App (Vercel + Render)" section -- reworded to local-first framing (no
+functional code changes beyond comments) or, for the README section, rewritten as
+"Local Web App" with an explicit new subsection on why a Vercel-hosted frontend can't
+reach a backend on your own machine (127.0.0.1 means different things to different
+machines) -- flagged as a real limitation of "local backend" rather than something to
+route around by quietly reintroducing Render.
+
+Updated NEXT_PUBLIC_API_URL's default/example to 127.0.0.1:8000 and the uvicorn run
+command to --host 127.0.0.1 --port 8000, matching the user's own example commands
+exactly rather than leaving the prior localhost:8000 phrasing.
+
+Regression discipline: ran `python verify.py all` after the removal + doc pass -- all
+8 phases green. Then ran the full `pytest tests/` (92 tests including tests/test_api.py)
+-- hit a transient Windows file-lock PermissionError from running two pytest processes
+against the same `.pytest_tmp` basetemp concurrently (my own mistake, backgrounding
+`verify.py all` and `pytest tests/test_api.py` at the same time) -- re-ran cleanly,
+sequentially, and got 92/92 passed, 8/8 phases OK. Not a real regression, confirmed by
+the clean re-run.
+
+Then did the full 14-point local end-to-end pass requested, for real, not by
+inspection alone:
+1. `python -m src.main --url https://youtu.be/L2NAh3CIdig --dialogue-text "On your
+   left"` run directly -- cache hit, subtitle fast-path, correct match, confirms the
+   CLI is fully intact.
+2. Started `uvicorn api.app:app --host 127.0.0.1 --port 8000` for real.
+3. `GET /api/health` -- real curl, 200 OK.
+4. Started `npm run dev` (web/), opened the actual page in a real browser (Claude
+   Code's browser tool), submitted a real subtitle-match search through the actual UI
+   -- completed instantly (cache hit), correct timestamp (00:00:16.725), correct text,
+   frame image element rendered with zero console errors.
+5. Submitted a nonsense phrase against the same cached video to force the full
+   ASR->OCR escalation path for real (not mocked) -- watched the backend log show
+   real progress ("[3/5] Running speech recognition (ASR)...", "[4/5] ... fetching
+   higher-quality video for on-screen text (OCR)...", live OCR percentage progress
+   ticking 31% -> 63% -> 96%) before landing on a correct `not_found`, confirmed
+   identically in the browser UI with zero console errors.
+6. Invalid URL ("not-a-valid-url") through the real UI -- clean 400, "video_url must
+   be an http(s) URL" surfaced with no crash.
+7. A syntactically-valid but nonexistent YouTube URL, to force a genuine processing
+   failure -- watched the real traceback land in the backend's own terminal
+   (logger.exception, never sent anywhere), while the browser received and displayed
+   only the clean, human-readable message ("Failed to extract/download ... This video
+   is unavailable") -- confirms "do not expose Python stack tracebacks to the
+   frontend" is actually true, not just asserted.
+8. The big one: submitted a real job, waited for it to reach "processing", then
+   actually killed the uvicorn process (taskkill) and restarted it fresh (empty
+   in-memory job store) while the frontend kept polling in the background. Watched the
+   real console errors during the outage (net::ERR_CONNECTION_REFUSED x3, correctly
+   swallowed/retried rather than crashing), then watched the exact expected recovery
+   once the server came back up: the now-restarted server's clean job store returned
+   404, and the frontend's fix from last turn caught that specifically and displayed
+   "Lost track of this job -- the server may have restarted while it was running.
+   Please try again." -- exactly the behavior requested, verified against a real kill
+   and real restart, not simulated.
+
+Two accidental self-inflicted test-methodology bugs found and fixed mid-session (not
+bugs in the app): (a) clicking into a text input with `computer{action:"left_click"}`
+places the cursor but doesn't select existing text, so typing a second value into an
+already-filled field appended rather than replaced it, producing a garbled URL that
+correctly (if confusingly) got rejected as invalid -- fixed by using triple_click to
+select-all before typing, and cross-checking the actual DOM value via a JS read before
+submitting, for every subsequent test. (b) ran two pytest invocations concurrently
+against the same --basetemp dir, causing a Windows file-lock collision -- fixed by not
+doing that.
+
+Deleted `render.yaml`/`Dockerfile.api` cleanly (git status shows only the intended
+diff: two deletions, doc/comment edits to api/app.py, api/jobs.py, requirements.txt,
+both .env.example files, README.md, and the already-existing frontend fix). Left git
+add/commit/push to the user, as always.
+---
