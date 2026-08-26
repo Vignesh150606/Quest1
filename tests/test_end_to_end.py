@@ -419,6 +419,43 @@ def test_main_reconfigures_stdout_stderr_to_avoid_encoding_crashes(monkeypatch, 
     assert ("stderr", {"errors": "replace"}) in calls
 
 
+def test_main_prompts_interactively_when_flags_omitted(monkeypatch, tmp_path):
+    # A recruiter running this cold shouldn't need to already know the exact flag
+    # names -- omitting --url/--dialogue-text falls back to input() prompts instead of
+    # argparse's "required" error. --url/--dialogue-text must still work exactly as
+    # before when given (see the reconfigure test above), so this only covers the
+    # omitted case.
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.sys, "argv", ["prog"])
+    prompts = iter(["http://example.com/video", "hello there"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(prompts))
+
+    captured = {}
+
+    def fake_run_pipeline(url, text, output, **kwargs):
+        captured["url"] = url
+        captured["text"] = text
+        return os.path.join(str(tmp_path), "report.json")
+
+    monkeypatch.setattr(main_module, "run_pipeline", fake_run_pipeline)
+
+    main_module.main()
+
+    assert captured == {"url": "http://example.com/video", "text": "hello there"}
+
+
+def test_main_exits_cleanly_on_empty_interactive_input(monkeypatch):
+    import src.main as main_module
+
+    monkeypatch.setattr(main_module.sys, "argv", ["prog"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+
+    with pytest.raises(SystemExit) as exc_info:
+        main_module.main()
+    assert exc_info.value.code == 1
+
+
 # ---------------------------------------------------------------------------
 # Network tests -- opt-in, real download + real model (see pytest.ini)
 # ---------------------------------------------------------------------------

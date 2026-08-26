@@ -28,12 +28,53 @@ of the cost -- a pure throughput fix, zero accuracy impact.
 Verification (see PHASES.md): pytest tests/test_ocr_track.py::test_synthetic_clip
 """
 
+import contextlib
+import os
+import sys
+import warnings
 from dataclasses import dataclass
 from typing import Optional
 
 import av
 import numpy as np
-from paddleocr import PaddleOCR
+
+# paddle's cpp_extension helper warns "No ccache found..." on import, unconditionally,
+# regardless of whether anything actually needs to JIT-compile a C++ extension -- we
+# never do (PaddleOCR is used purely through its inference API). Scoped to this exact
+# message (not a blanket warnings.filterwarnings("ignore")) so it doesn't hide an
+# unrelated, genuinely useful warning from the same or another library.
+warnings.filterwarnings("ignore", message="No ccache found.*")
+
+
+@contextlib.contextmanager
+def _suppress_native_stderr():
+    """
+    Temporarily redirects the OS-level stderr file descriptor to devnull.
+
+    That ccache probe above shells out to `where ccache` (and paddle's cuda probe does
+    the same for `nvcc`) at import time. When nothing is found, Windows' `where.exe`
+    itself writes "INFO: Could not find files for the given pattern(s)." directly to
+    the OS stderr file descriptor -- confirmed directly (`where nonexistent 1>/dev/null`
+    still shows it; `2>/dev/null` hides it) that this bypasses Python's warnings/logging
+    entirely, since it's a separate child process's own stderr, not anything raised in
+    this interpreter. Redirecting sys.stderr alone would not reach it -- only the
+    underlying OS file descriptor does, which is what a child process actually inherits
+    and writes to.
+    """
+    stderr_fd = sys.stderr.fileno()
+    saved_fd = os.dup(stderr_fd)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(devnull_fd, stderr_fd)
+        yield
+    finally:
+        os.dup2(saved_fd, stderr_fd)
+        os.close(devnull_fd)
+        os.close(saved_fd)
+
+
+with _suppress_native_stderr():
+    from paddleocr import PaddleOCR  # noqa: E402 -- must follow the filter/suppress above
 
 from src.text_match import DEFAULT_MATCH_THRESHOLD, normalize, similarity
 from src.types import Candidate, VideoAsset

@@ -31,7 +31,7 @@ def make_synthetic_clip(output_path: str, text: str, onset_s: float, duration_s:
     escaped_text = _escape_drawtext_text(text)
 
     # font=Arial (relying on the ffmpeg build's bundled fontconfig) is tried first per
-    # PHASES_2_7_PLAN.md, but verified to fail on this machine with "Fontconfig error:
+    # PHASES_1_7_PLAN.md, but verified to fail on this machine with "Fontconfig error:
     # Cannot load default config file" -- the fallback to an explicit fontfile= is not
     # a hypothetical, it's what actually runs here.
     result = subprocess.run(

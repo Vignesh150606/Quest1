@@ -1,0 +1,158 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #f5f5f7;
+  color: #1a1a1a;
+}
+
+.page {
+  min-height: 100vh;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 4rem 1rem;
+}
+
+.card {
+  width: 100%;
+  max-width: 560px;
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 2.5rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 8px 24px rgba(0, 0, 0, 0.06);
+}
+
+h1 {
+  margin: 0 0 0.4rem;
+  font-size: 1.6rem;
+}
+
+.subtitle {
+  margin: 0 0 1.75rem;
+  color: #5f6368;
+  font-size: 0.95rem;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: #333;
+}
+
+input {
+  font-size: 1rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #d7d7db;
+  border-radius: 8px;
+  outline: none;
+}
+
+input:focus {
+  border-color: #4b6bfb;
+}
+
+input:disabled {
+  background: #f0f0f2;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  font-size: 1rem;
+  font-weight: 600;
+  background: #1a1a1a;
+  color: #fff;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  background: transparent;
+  color: #1a1a1a;
+  border: 1px solid #d7d7db;
+  font-weight: 500;
+  margin-top: 1rem;
+}
+
+.error {
+  color: #c0362c;
+  font-size: 0.9rem;
+  margin-top: 0.75rem;
+}
+
+.status,
+.result {
+  margin-top: 1.75rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #eee;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: #444;
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #d7d7db;
+  border-top-color: #1a1a1a;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.result h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+}
+
+.timestamp {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 1.4rem;
+  margin: 0 0 0.5rem;
+}
+
+.matched-text {
+  font-size: 1.05rem;
+  font-style: italic;
+  margin: 0 0 0.5rem;
+}
+
+.meta {
+  color: #5f6368;
+  font-size: 0.85rem;
+  margin: 0 0 1rem;
+}
+
+.frame {
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid #eee;
+  display: block;
+}

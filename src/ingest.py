@@ -6,7 +6,7 @@ Produces: VideoAsset; optional Candidate(modality="subtitle") on fast-path hit
 
 Verification (see PHASES.md): pytest tests/test_ingest.py
 (Phase 1's real network-dependent check is `pytest -m network tests/test_ingest.py`;
-verify.py 1 runs the offline suite -- see PHASE1_PLAN.md for why.)
+verify.py 1 runs the offline suite -- see PHASES_1_7_PLAN.md for why.)
 
 Two-tier fetch (hardening added post-Phase-6, runtime audit): verified directly (not
 assumed) that ok.ru exposes no genuine audio-only format -- every listed format has
@@ -596,7 +596,7 @@ def _subtitle_kind_for(sub_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Subtitle parsing (WebVTT + SRT, one parser -- see PHASE1_PLAN.md)
+# Subtitle parsing (WebVTT + SRT, one parser -- see PHASES_1_7_PLAN.md)
 # ---------------------------------------------------------------------------
 
 

@@ -41,7 +41,7 @@ def reconcile(
     convention as the ASR/OCR tracks' own dedup/clustering.
 
     Within a cluster, the winner ranks by (confidence, similarity) descending --
-    confidence first, similarity as the tiebreaker (see PHASES_2_7_PLAN.md: this is
+    confidence first, similarity as the tiebreaker (see PHASES_1_7_PLAN.md: this is
     what the scaffold's "higher_confidence" test case actually exercises, despite both
     of its candidates sharing the same confidence). This can shift the reported onset
     by up to tolerance_s versus the earliest candidate in the cluster; CLAUDE.md's

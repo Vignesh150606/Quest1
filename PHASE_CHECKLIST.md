@@ -1,10 +1,16 @@
 # Phase Checklist
 
 - [x] **Phase 0** - Environment sanity — `python verify.py 0`
-- [x] **Phase 1** - Ingest + shared schema — implement `src/ingest.py`, remove skip in `tests/test_ingest.py`, then `python verify.py 1`
-- [ ] **Phase 2** - ASR track — implement `src/asr_track.py`, remove skip in `tests/test_asr_track.py`, then `python verify.py 2`
-- [ ] **Phase 3** - OCR track — implement `src/ocr_track.py` + `tests/fixtures/make_synthetic_clip.py`, remove skip in `tests/test_ocr_track.py`, then `python verify.py 3`
-- [ ] **Phase 4** - Arbiter — implement `src/arbiter.py`, remove skip in `tests/test_arbiter.py`, then `python verify.py 4`
-- [ ] **Phase 5** - Refine — implement `src/refine.py`, remove skip in `tests/test_refine.py`, then `python verify.py 5`
-- [ ] **Phase 6** - Report + CLI integration — implement `src/report.py` + `run_pipeline()` in `src/main.py`, remove skips in `tests/test_end_to_end.py`, then `python verify.py 6`
-- [ ] **Phase 7** - Packaging — `docker build -t quest1-solver . && docker run --rm -v $(pwd)/output:/output quest1-solver --url <ok.ru URL> --dialogue-text "..."`, then confirm README's local-fallback steps reproduce the same result without Docker
+- [x] **Phase 1** - Ingest + shared schema — `src/ingest.py`, `python verify.py 1`
+- [x] **Phase 2** - ASR track — `src/asr_track.py`, `python verify.py 2`
+- [x] **Phase 3** - OCR track — `src/ocr_track.py` + `tests/fixtures/make_synthetic_clip.py`, `python verify.py 3`
+- [x] **Phase 4** - Arbiter — `src/arbiter.py`, `python verify.py 4`
+- [x] **Phase 5** - Refine — `src/refine.py`, `python verify.py 5`
+- [x] **Phase 6** - Report + CLI integration — `src/report.py` + `run_pipeline()` in `src/main.py`, `python verify.py 6`
+- [x] **Phase 7** - Packaging — `docker build -t quest1-solver . && docker run --rm -v $(pwd)/output:/output quest1-solver --url <ok.ru URL> --dialogue-text "..."`, confirmed README's local-fallback steps reproduce the same result without Docker
+
+All phases verified with `python verify.py all`. See `prompts.txt` for the real bugs
+found and fixed after each phase's initial "done" (subtitle-track edge cases, OCR/subtitle
+false-positive matching, runtime hardening) -- generalization testing against real,
+non-example videos kept surfacing issues no synthetic fixture or the single graded
+example could have caught.

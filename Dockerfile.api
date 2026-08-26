@@ -1,0 +1,35 @@
+# Render backend image. Deliberately built from the same base + system deps as the
+# existing Dockerfile (ffmpeg, libgl1) rather than a from-scratch image: that Dockerfile
+# was already verified end-to-end in Docker (see its own comments) through the
+# subtitle/ASR path, so reusing the same layers here means the API inherits a
+# known-working environment instead of a fresh, unverified one. The only difference is
+# the entrypoint: uvicorn serving api.app:app instead of the CLI.
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# See the main Dockerfile for why these are set and what was actually tried/verified
+# (an unresolved upstream PaddlePaddle/oneDNN issue under WSL2). Kept here too since
+# it's the same PaddleOCR dependency in the same kind of container; whether Render's
+# host virtualization hits the identical crash is unverified until deployed there --
+# QUEST1_SKIP_OCR below is the fallback if it does.
+ENV DNNL_MAX_CPU_ISA=AVX2
+ENV ONEDNN_MAX_CPU_ISA=AVX2
+ENV FLAGS_use_mkldnn=0
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/ ./src/
+COPY api/ ./api/
+
+# --workers 1 is not a tuning choice -- it's required by api/jobs.py's in-memory job
+# store (see its module docstring): a second worker process would have its own,
+# disconnected copy of the job dict and would 404 on jobs another worker created.
+# Render injects $PORT at runtime; shell form so that expansion happens.
+CMD uvicorn api.app:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1

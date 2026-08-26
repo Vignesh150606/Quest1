@@ -30,3 +30,12 @@ paddlepaddle==3.0.0
 # "prefer a library's direct API over a wrapper when the wrapper adds little value."
 # Dropping it also removes the constraint that forced paddleocr==2.10.0 -- that pin is
 # kept anyway since 2.10.0 is the version actually verified against this codebase.
+
+# --- Web API (Render backend) ---
+# Thin wrapper around the existing pipeline -- see api/. uvicorn[standard] pulls in
+# uvloop/httptools for real deployment performance; not needed for the CLI itself.
+fastapi==0.121.2
+uvicorn[standard]==0.38.0
+# httpx: required by fastapi.testclient.TestClient (tests/test_api.py) -- was already
+# present transitively, pinned explicitly rather than relied on implicitly.
+httpx==0.28.1

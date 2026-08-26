@@ -1,0 +1,28 @@
+# Render Blueprint for the backend API. See README.md's "Render Deployment" section
+# for the manual-dashboard equivalent if you'd rather not use a Blueprint.
+services:
+  - type: web
+    name: quest1-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile.api
+    dockerContext: .
+    # faster-whisper "small" (int8) + PaddleOCR both load real models into memory --
+    # unverified exactly how much Render's plan tiers need since this hasn't been
+    # deployed there yet (flagging rather than guessing): Render's free/starter tier
+    # (512MB) is very likely too small. Start at "standard" and downsize only after
+    # watching real memory usage in the Render dashboard.
+    plan: standard
+    healthCheckPath: /api/health
+    envVars:
+      # Comma-separated list of allowed frontend origins (see api/app.py). Set this to
+      # your actual Vercel deployment URL after the frontend is deployed -- CORS will
+      # reject the browser's requests until it's set correctly.
+      - key: ALLOWED_ORIGINS
+        value: https://your-app.vercel.app
+      # Set to "true" if PaddleOCR crashes on Render the same way it does under Docker
+      # Desktop's WSL2 locally (see Dockerfile.api's comment) -- unverified until
+      # deployed. Subtitle/ASR paths are unaffected either way.
+      - key: QUEST1_SKIP_OCR
+        value: "false"
+      - key: QUEST1_MAX_CONCURRENT_JOBS
+        value: "2"

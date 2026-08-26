@@ -145,9 +145,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Find the exact frame where a dialogue appears in a video URL."
     )
-    parser.add_argument("--url", required=True, help="Video URL to search")
     parser.add_argument(
-        "--dialogue-text", required=True, help="Target dialogue text to locate"
+        "--url", default=None, help="Video URL to search (prompted for if omitted)"
+    )
+    parser.add_argument(
+        "--dialogue-text",
+        default=None,
+        help="Target dialogue text to locate (prompted for if omitted)",
     )
     parser.add_argument("--output", default="./output", help="Output directory")
     parser.add_argument(
@@ -178,10 +182,22 @@ def main():
     )
     args = parser.parse_args()
 
+    # Interactive fallback: a recruiter running this cold shouldn't need to know the
+    # exact flag names up front. --url/--dialogue-text still work exactly as before for
+    # scripting/grading; this only fires when either is omitted.
+    video_url = args.url or input("Video URL: ").strip()
+    dialogue_text = args.dialogue_text or input("Dialogue text to find: ").strip()
+    if not video_url:
+        print("Error: a video URL is required.", file=sys.stderr)
+        sys.exit(1)
+    if not dialogue_text:
+        print("Error: dialogue text is required.", file=sys.stderr)
+        sys.exit(1)
+
     try:
         report_path = run_pipeline(
-            args.url,
-            args.dialogue_text,
+            video_url,
+            dialogue_text,
             args.output,
             model_size=args.model,
             work_dir=args.work_dir,

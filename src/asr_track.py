@@ -12,7 +12,7 @@ No CUDA GPU on the dev machine (Intel Iris Xe integrated only) -- device default
 "cpu" with compute_type "int8" accordingly. model_size defaults to "small": "base" is
 noticeably weaker on period/accented British dialogue (risks mis-transcribing the exact
 target line badly enough that even fuzzy matching misses), "medium" costs ~35-40min on
-this CPU for the full ~54min example vs. ~10-15min for "small" -- see PHASES_2_7_PLAN.md.
+this CPU for the full ~54min example vs. ~10-15min for "small" -- see PHASES_1_7_PLAN.md.
 
 Chunked decoding (hardening added post-Phase-6): faster-whisper's own transcribe(path)
 internally calls decode_audio(), which reads the ENTIRE file into one contiguous
@@ -41,7 +41,7 @@ wanting the old wider search can still pass beam_size=5 explicitly.
 
 Verification (see PHASES.md): pytest tests/test_asr_track.py::test_example_video
 (network/model-dependent; verify.py 2 runs the offline word-window-matching suite --
-see PHASES_2_7_PLAN.md for why).
+see PHASES_1_7_PLAN.md for why).
 """
 
 import wave

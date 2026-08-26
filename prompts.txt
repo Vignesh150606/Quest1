@@ -1072,3 +1072,283 @@ categories of bugs that neither the graded example (no subtitle track at all) no
 synthetic test fixtures (clean, well-formed VTT) could ever have exposed.
 
 ---
+
+Session prompt: "commited, combine phase1_md and phase 2_7_plan md into one 1_7 then
+there are several things which are not needed like the cache and all make the code
+base look neat and easy for recruiter to review it easily remove run_volopay and all
+add a better CLI interface like ask for link then text ... why is this warning coming
+every time i run cmd it does not look good make it proper then check for the few
+small size videos after that we will dockerize" -- a multi-part cleanup/polish pass,
+handled as several distinct pieces:
+
+1. Merged PHASE1_PLAN.md + PHASES_2_7_PLAN.md into one PHASES_1_7_PLAN.md (single
+   intro, phase-by-phase sections preserved as-is from both source docs, kept in the
+   forward-looking planning voice they were originally written in -- this is a
+   historical record of pre-implementation decisions, not a description of final
+   state; APPROACH.md and prompts.txt cover that). Updated all 6 in-code references
+   (src/arbiter.py, src/asr_track.py, src/ingest.py,
+   tests/fixtures/make_synthetic_clip.py) to point at the new filename. Deleted the
+   two originals.
+
+2. Removed tracked clutter that had been committed into the repo root during ad hoc
+   testing this session: recruiter_test_cache/, recruiter_test_output/,
+   run_task4.log, run_task4_output/, run_volopay2.log, run_volopay2_output/ -- all
+   git rm'd (user explicitly authorized: "remove run_volopay and all"). Also cleaned
+   local-only untracked clutter (.cache_probe_unused/, stray output/) for a tidy
+   working copy. Updated PHASE_CHECKLIST.md's stale phase 2-7 checkboxes (still shown
+   unchecked despite the project being fully complete) to reflect actual status --
+   left unchecked would read as incomplete work to a reviewer.
+
+3. **Flagged a bigger issue found while doing this pass, before continuing**:
+   APPROACH.md -- explicitly "the most heavily graded document" per CLAUDE.md, and a
+   directly graded deliverable per the task brief -- was entirely unwritten (every
+   section still the original placeholder HTML comment, zero real content), on the
+   actual submission deadline day. Asked the user whether to write it now or continue
+   the cleanup first; user chose to write it themselves later ("I will write it later
+   from what i understood and then converting into approach now focus on other
+   jobs") -- deferred, not forgotten; continued with the requested cleanup as
+   instructed.
+
+4. Added an interactive CLI fallback to src/main.py: if --url/--dialogue-text are
+   omitted, main() now prompts for them via input() instead of argparse's opaque
+   "required" error -- a recruiter running this cold shouldn't need to already know
+   the exact flag names. --url/--dialogue-text still work exactly as before when
+   given (existing tests unaffected). 2 new tests: prompts fire and their values
+   flow through to run_pipeline() correctly; empty interactive input exits cleanly
+   (code 1) rather than proceeding with a blank URL/phrase.
+
+5. Root-caused and fixed the "No ccache found..." warning the user asked about,
+   which appeared on literally every run: it's paddle's cpp_extension helper
+   (`find_ccache_home()`) warning at import time, unconditionally, regardless of
+   whether anything actually needs to JIT-compile a C++ extension (PaddleOCR is used
+   purely through its inference API here, never does). Fixed with a scoped
+   `warnings.filterwarnings` (not a blanket ignore-all, so it can't hide an unrelated
+   warning). While investigating, found a SECOND, separate noise source the user had
+   also been seeing every run but hadn't specifically named: a stray "INFO: Could not
+   find files for the given pattern(s)." line before any of the pipeline's own
+   output. Traced directly (not guessed): this is Windows' own `where.exe`, which
+   paddle's cpp_extension shells out to for the same ccache/nvcc probe, writing that
+   exact message straight to the OS-level stderr file descriptor when nothing is
+   found -- confirmed by testing `where nonexistent` with each stream individually
+   redirected. This bypasses Python's warnings/logging system entirely (it's a
+   separate child process's own stderr), so no warnings filter could touch it; fixed
+   with a narrowly-scoped OS-level stderr file-descriptor redirect
+   (_suppress_native_stderr(), using os.dup2) wrapped tightly around just the `from
+   paddleocr import PaddleOCR` statement, restored immediately after via try/finally
+   -- verified this doesn't swallow genuine import errors, since Python exceptions
+   propagate independent of fd redirection, and the fd is restored before any
+   traceback would print.
+
+6. Re-verified 3 previously-tested small real videos end-to-end after all the above
+   changes (Avengers trailer via flags, Shape of You via the NEW interactive prompt
+   path for real using piped stdin, the Google Drive volopay video for the ASR-only
+   path) -- all three produced clean output (zero stray WARNING/ERROR/INFO noise,
+   confirmed by direct terminal inspection) and the same correct results as their
+   original runs, confirming no regression from the CLI/warning-suppression changes.
+
+`python verify.py all`: green (8/8 phases) after all changes. README.md was also
+completely unwritten (same placeholder-only state as APPROACH.md) -- filled it in
+fully (what it does, Docker + local quick starts with exact ffmpeg-per-OS steps,
+usage including the new interactive mode, output format, running tests, repository
+structure) as part of "make the codebase easy for a recruiter to review," since
+that's the first file anyone opens and unlike APPROACH.md it's factual/mechanical to
+write (describing what exists) rather than requiring the user's own design-rationale
+synthesis.
+
+Docker verification (the user's explicit next step) intentionally NOT done yet --
+holding for the user's go-ahead per their own stated sequencing ("after that we will
+dockerize").
+
+---
+
+Session prompt: "dockerize it now." Docker Desktop was not installed on this dev
+machine at all -- flagged this rather than claiming a verification that couldn't
+happen, asked how to proceed. User chose to actually install it. This became a real,
+multi-step environment-setup effort, not just a code task:
+
+1. WSL2 wasn't installed either -- guided the user through `wsl --install` (elevated
+   PowerShell), a restart, then `winget install Docker.DockerDesktop`. First
+   `docker build` attempt failed with disk space exhausted: `error committing ...:
+   write .../metadata_v2.db: read-only file system` -- root-caused directly (not
+   guessed) by checking actual drive free space: C: had 0 bytes free, and Docker
+   Desktop's WSL2 virtual disk lives on C: by default. D: (where this project lives)
+   had 39GB free.
+2. User uninstalled Docker Desktop and asked to reinstall it targeting D: from the
+   start. Verified the correct installer flags via web search rather than guessing
+   (`--installation-dir=`, `--wsl-default-data-root=`) before giving the command --
+   getting this wrong would have wasted another full reinstall cycle. Walked through:
+   downloading the installer directly to D: (not $env:TEMP, which is on C: and was
+   still full at that point), running it with both location flags, then verifying via
+   `docker run hello-world` -- which succeeded. User also asked "why not use winget"
+   partway through; verified winget's `--override` passthrough syntax before offering
+   it as an alternative, while noting a known winget/Docker-specific compatibility
+   issue with location flags (GitHub docker/for-win#13319) that made the direct-
+   installer path the more proven route for this specific package.
+3. My own tool shells (Bash and PowerShell) didn't pick up the newly-installed
+   `docker` on PATH (stale PATH cached at session start, same class of issue the
+   user's own first PowerShell window hit) -- resolved directly by locating
+   docker.exe and prepending it to $env:PATH per-command rather than assuming a shell
+   restart would fix it (this session's tool shells persist across calls but don't
+   auto-refresh PATH).
+
+Real bug found by actually building and running the image (not assumed, exactly the
+kind of gap CLAUDE.md's "Docker: primary path, not the only path" note anticipates):
+first real `docker build` succeeded completely (all deps installed cleanly, confirmed
+by reading the actual build log line by line, not just the exit code) -- but the
+first real `docker run` against a real video crashed the OCR track specifically:
+"Error: could not create a primitive descriptor for a reorder primitive". The
+identical code has run correctly natively on this same physical machine dozens of
+times this session; this reproduces only inside the containerized environment (Docker
+Desktop's WSL2 VM).
+
+Root-caused as a oneDNN/MKLDNN CPU-acceleration issue via web research (not guessed):
+tried two independent, targeted, well-documented fixes, one at a time, rebuilding and
+re-running the real container after each to verify (not assumed fixed):
+  1. oneDNN's own DNNL_MAX_CPU_ISA/ONEDNN_MAX_CPU_ISA=AVX2 env vars (its documented
+     mechanism for capping which CPU instruction set it detects/uses, for exactly
+     this class of VM/CPUID-mismatch problem). Rebuilt, re-ran: identical crash.
+  2. PaddlePaddle's own separate FLAGS_use_mkldnn=0 flag (a different mechanism than
+     oneDNN's own env vars, controls MKLDNN-backed CPU kernel selection at the
+     framework level). Rebuilt, re-ran: identical crash.
+Searched multiple GitHub issues/discussions against PaddlePaddle and PaddleOCR
+directly for this exact error string -- found the same error reported by other users
+back to 2023, with no confirmed fix from maintainers or the community in any of them.
+This appears to be a genuine, currently-unresolved upstream bug, not something this
+project's code or dependency pins caused or can straightforwardly work around.
+
+Per CLAUDE.md's explicit "stop and flag... a major dependency incompatibility... don't
+silently work around a broken assumption" instruction, presented this finding with
+full evidence to the user (both failed fix attempts, confirmed-working parts of the
+pipeline) rather than continuing to guess indefinitely under deadline pressure or
+silently shipping a broken Docker path. User's decision: "Only docker upto ASR then
+document it" -- verified this is exactly what already works: ran a real end-to-end
+container test against a video where ASR (not OCR) finds the answer -- clean success,
+exit 0, correct match (identical result to the same video's many native runs this
+session: "potential fit for Wallopay" at 00:00:24.633, frame 739), output files
+correctly written through the volume mounts.
+
+Documented the limitation honestly in two places rather than silently shipping a
+Docker image that crashes on some inputs: README.md's Docker section now has an
+explicit "Known limitation" callout (what works, what doesn't, why, and the
+workaround -- --skip-ocr in Docker for a fast not_found instead of a crash, or the
+local Python fallback for a case that genuinely needs OCR); Dockerfile's own comments
+document both failed fix attempts in detail (kept the env vars anyway -- harmless, and
+might help on a different host's virtualization stack even though they didn't here).
+No source code changed in this entire Docker investigation -- only Dockerfile/README
+documentation, so no regression risk to the existing test suite.
+
+---
+
+User asked (verbatim, condensed): "Convert Existing CLI Video Pipeline into a Vercel +
+Render Web App" -- a long, fully-specified request: wrap the existing CLI pipeline in
+a web app without rewriting the pipeline itself, Next.js frontend on Vercel, FastAPI
+backend on Render, async job queue (POST /api/jobs returns a job_id immediately, GET
+/api/jobs/{id} polled for status), job states queued/processing/completed/not_found/
+failed, frame image served through a backend endpoint (not uploaded to Vercel), no
+Redis unless actually necessary, CORS via an env var (not allow_origins=["*"]), no
+stack traces exposed to the user, .env.example for both frontend and backend, and an
+explicit instruction to inspect the existing repo first and preserve all existing
+tests/CLI behavior.
+
+Inspected the repo before changing anything (per the request's own instruction):
+src/main.py's run_pipeline(video_url, dialogue_text, output_dir, ...) -> report.json
+path was already a clean, side-effect-isolated callable, fully decoupled from
+argparse/CLI concerns -- meant the API layer could call it directly with zero pipeline
+refactoring, which is exactly the "smallest change" this project's CLAUDE.md asks for.
+
+Built api/jobs.py (in-memory dict job store + a small ThreadPoolExecutor -- explicitly
+the simplest reliable thing for a first deployment per the user's own instruction not
+to introduce Redis yet; documented in the module's own docstring how to swap to
+RQ/Celery later and why --workers 1 is required for this design) and api/app.py (thin
+FastAPI layer: POST/GET /api/jobs, GET /api/jobs/{id}/frame serving the PNG via
+FileResponse, GET /api/health, CORS restricted to an ALLOWED_ORIGINS env var). Reused
+report.json's existing "status" values (match/ambiguous/not_found) rather than
+inventing a second status taxonomy -- not_found and failed are kept distinct exactly
+as they already are in the CLI (not_found = ran fine, nothing matched; failed = an
+exception, str(exc) surfaced same as the CLI's own "Error: {exc}" printing, full
+traceback logged server-side only, never sent to the client).
+
+Found and fixed a genuine pre-existing environment bug while adding tests: pytest's
+tmp_path fixture failed with PermissionError on this machine's
+C:\Users\...\Temp\pytest-of-csrvi (access denied, likely a leftover ACL from the
+Docker Desktop install session) -- confirmed this affected EXISTING tests too, not
+just new ones (ran tests/test_end_to_end.py::test_write_report_match unmodified,
+same crash), meaning `python verify.py all` was silently broken on this machine before
+this session touched anything. Fixed by adding --basetemp=.pytest_tmp to pytest.ini
+(routes pytest's temp dir into the repo instead of the broken system temp folder) --
+verified by re-running the full existing suite (92 tests) and `python verify.py all`
+(all 8 phases) afterward, both fully green.
+
+Wrote tests/test_api.py (9 tests, offline, run_pipeline monkeypatched at the
+api.jobs module boundary -- same philosophy as tests/test_end_to_end.py's existing
+mocked short-circuit tests): health check, URL/query validation (400s), a full
+queued->completed lifecycle including the frame endpoint returning real image bytes,
+not_found, failed-without-leaking-a-traceback, and 404s for unknown job ids.
+
+Beyond the mocked unit tests, ran a genuine end-to-end smoke test with NO mocking:
+called api.jobs.create_job() directly with the project's existing synthetic-clip test
+fixture (tests/fixtures/make_synthetic_clip.py) so the real run_pipeline() executed --
+real faster-whisper ASR, real PaddleOCR (the synthetic clip's text is burned into the
+frame, not spoken, so this exercised the OCR track specifically), real background
+ThreadPoolExecutor thread, real report.json, real frame PNG served through the actual
+FastAPI app (fastapi.testclient.TestClient, in-process ASGI, not just Python function
+calls) -- job reached "completed" with the correct frame (50) and text within ~30s,
+frame endpoint returned 16732 real PNG bytes.
+
+Then went further and did a REAL live test through the actual browser: started
+`uvicorn api.app:app --port 8000` and `npm run dev` (Next.js) as separate background
+processes, opened http://localhost:3000 in the Claude Code browser tool, and drove the
+actual UI by hand: (1) submitted a real YouTube URL (https://youtu.be/L2NAh3CIdig,
+"On your left") -- watched it go queued -> processing -> completed with the correct
+timestamp (00:00:16.725), matched text, source (subtitle), and a real rendered frame
+image with zero console errors; (2) clicked "Search again", confirmed the form/result
+state reset cleanly; (3) submitted an invalid (non-http) URL and confirmed the
+frontend surfaced the backend's exact 400 error message ("video_url must be an
+http(s) URL") with no crash, no stack trace, no console error. This is real evidence
+the two deployed pieces (frontend fetch/poll logic, backend CORS+validation+job
+wiring) actually work together, not just that each passes its own isolated tests.
+
+Built web/ as a minimal Next.js (App Router) app -- one page (web/app/page.js): URL +
+phrase inputs, fetch-and-poll (2.5s interval) against NEXT_PUBLIC_API_URL, a status
+area (queued/processing spinner), a result card (timestamp, matched text, frame image,
+source/frame/score), explicit not_found/failed states, and a reset button. No UI
+framework or state library added -- plain fetch + useState per the request's own "keep
+the UI minimal, don't over-engineer" instruction. Verified `npm run build` succeeds
+(Next.js 16.3.3 / React 19.2.8 -- checked actual latest versions via `npm view` rather
+than guessing, since an earlier guess at a uvicorn version in this same session
+(0.38.1) didn't exist and had to be corrected against the real PyPI version list).
+
+Created Dockerfile.api (Render backend image) deliberately reusing the same base image
+and system deps (ffmpeg, libgl1) as the existing, already-verified Dockerfile rather
+than starting a fresh, unverified image -- only the entrypoint differs (uvicorn
+instead of the CLI), and it inherits the same documented oneDNN env-var mitigations.
+Added render.yaml (Docker-runtime Blueprint, plan defaulted to "standard" rather than
+free/starter with a comment flagging that faster-whisper "small" + PaddleOCR's real
+memory footprint on Render's infra is UNVERIFIED until actually deployed there -- did
+not guess a smaller plan would work). Also flagged, not silently assumed: whether
+Render's container host hits the same PaddlePaddle/oneDNN crash found locally under
+Docker Desktop's WSL2 is unknown until deployed -- QUEST1_SKIP_OCR env var documented
+as the immediate mitigation if it recurs there too.
+
+Did NOT create the actual Vercel/Render deployments, accounts, or push any billing-
+triggering action -- wrote the configs (render.yaml, Dockerfile.api, both
+.env.example files) and documented the exact manual steps in README.md's new "Web App
+(Vercel + Render)" section instead, consistent with this being the user's action to
+take (real accounts/billing), not something to do on their behalf.
+
+Updated README.md with a full "Web App (Vercel + Render)" section (architecture
+diagram in prose, local dev commands for both processes, Render deploy steps, Vercel
+deploy steps, an environment-variable table, and an explicit "Limitations" list: no
+process-restart durability for in-flight jobs, single-instance-only job store,
+unverified OCR-in-container behavior on Render, unmeasured Render memory footprint --
+flagged rather than silently omitted) and the Repository Structure tree (api/, web/,
+Dockerfile.api, render.yaml). Added requirements.txt entries (fastapi, uvicorn[standard],
+httpx -- the last one pins what was already present transitively as a TestClient
+dependency, rather than relying on it implicitly) and root/.env.example +
+web/.env.example.
+
+Nothing in src/ was modified. The CLI (`python -m src.main ...`) is unchanged and its
+full existing test suite (all 7 original phases, verify.py all) passes exactly as
+before -- confirmed by re-running it after every change in this session, not assumed.
+
+---
