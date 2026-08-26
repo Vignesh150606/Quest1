@@ -1454,3 +1454,31 @@ diff: two deletions, doc/comment edits to api/app.py, api/jobs.py, requirements.
 both .env.example files, README.md, and the already-existing frontend fix). Left git
 add/commit/push to the user, as always.
 ---
+
+User wrote their own understanding of the approach first (unprompted, in their own
+words -- problem interpretation, why dual-track, why fuzzy matching, why
+faster-whisper "small", two hand-drawn ASCII flowcharts) and asked to be taught the
+full codebase before writing it, explicitly to keep the "wrote it yourself" distinction
+real rather than proxying the whole doc through AI. Walked through the architecture,
+each stage's rationale, the arbiter's exact policy, the ASR-timestamp-vs-frame-boundary
+nuance in refine.py, the real bugs found via testing (degenerate short cue, stray-
+whitespace block-splitting, bracketed-annotation dilution), and the Volopay/Wallopay
+ASR-mistranscription finding from earlier this session, as a live teaching pass before
+they wrote anything.
+
+Then asked for APPROACH.md to be completed with a specific, explicit structure: their
+own original text first, verbatim in substance (no diagrams), then a clearly marked
+"AI-Assisted Elaboration" section with the full technical detail. Wrote APPROACH.md
+(previously just a heading skeleton with instructional HTML comments, never filled in)
+accordingly -- their own paragraph-form explanation preserved essentially as written
+(light cleanup only: fixed typos, no content added or reworded away from their
+original reasoning), a clear divider stating everything below was AI-elaborated, then
+the full doc: Problem Interpretation, Architecture (with their own decision-tree
+flowchart, cleaned up, plus the documented staged-short-circuit evolution from the
+original "run both tracks unconditionally" baseline and why it changed), How the
+Solution Decides Where to Look, How the Relevant Frame Is Determined (arbiter policy +
+refine's frame-mapping nuance), How the Text Is Extracted, Ambiguity & Uncertainty
+Handling, Trade-offs & What Was Cut (reconciled against CLAUDE.md's own cutting/
+not-building lists), and Known Limitations -- including the Volopay/Wallopay ASR
+finding and the three real bugs found via testing this session, all with real evidence
+already gathered earlier rather than invented for the doc.
